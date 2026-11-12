@@ -1,0 +1,68 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      chaos_steps:
+        description: "chaos steps"
+        default: "40"
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: make test integration
+
+  scenarios:
+    runs-on: ubuntu-24.04
+    outputs:
+      tests: ${{ steps.list.outputs.tests }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        run: echo "tests=$(grep -oP '^def \Ktest_\w+' tests/stand/test_scenarios.py | jq -Rcs 'split("\n")[:-1]')" >> "$GITHUB_OUTPUT"
+
+  stand:
+    needs: scenarios
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        test: ${{ fromJSON(needs.scenarios.outputs.tests) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: docker/setup-buildx-action@v3
+      - uses: crazy-max/ghaction-github-runtime@v3
+      - run: make venv stand-build-ci
+      - run: .venv/bin/python -m pytest -q -s "tests/stand/test_scenarios.py::${{ matrix.test }}"
+
+  chaos:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: docker/setup-buildx-action@v3
+      - uses: crazy-max/ghaction-github-runtime@v3
+      - run: make venv stand-build-ci
+      - run: .venv/bin/python -m pytest -q -s tests/stand/test_chaos.py
+        env:
+          CHAOS_SEED: ${{ contains(fromJSON('["push", "pull_request"]'), github.event_name) && '33' || github.run_id }}
+          CHAOS_STEPS: ${{ contains(fromJSON('["push", "pull_request"]'), github.event_name) && '6' || inputs.chaos_steps || '40' }}

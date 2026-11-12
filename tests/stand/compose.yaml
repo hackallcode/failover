@@ -1,0 +1,59 @@
+x-nats: &nats
+  image: "nats:2.15.2-alpine"
+  cap_add: ["NET_ADMIN"]
+  networks: ["net"]
+  volumes: ["./nats.conf:/etc/nats/common.conf:ro"]
+
+x-node: &node
+  image: "failover-stand-node"
+  cap_add: ["NET_ADMIN"]
+  volumes: ["./node:/stand:ro", "./config:/config:ro"]
+
+services:
+  litestream:
+    build: "../../litestream"
+    image: "failover-litestream"
+    entrypoint: ["/litestream", "version"]
+
+  nats-a:
+    <<: *nats
+    hostname: "nats-a"
+    command: ["-c", "/etc/nats/common.conf", "-n", "a", "--cluster_name", "stand", "--cluster", "nats://0.0.0.0:6222",
+              "--routes", "nats://nats-b:6222,nats://nats-c:6222", "-js", "-sd", "/data", "-m", "8222"]
+  nats-b:
+    <<: *nats
+    hostname: "nats-b"
+    command: ["-c", "/etc/nats/common.conf", "-n", "b", "--cluster_name", "stand", "--cluster", "nats://0.0.0.0:6222",
+              "--routes", "nats://nats-a:6222,nats://nats-c:6222", "-js", "-sd", "/data", "-m", "8222"]
+  nats-c:
+    <<: *nats
+    hostname: "nats-c"
+    command: ["-c", "/etc/nats/common.conf", "-n", "c", "--cluster_name", "stand", "--cluster", "nats://0.0.0.0:6222",
+              "--routes", "nats://nats-a:6222,nats://nats-b:6222", "-js", "-sd", "/data", "-m", "8222"]
+
+  node-a:
+    <<: *node
+    build:
+      context: "../.."
+      dockerfile: "tests/stand/node/Dockerfile"
+      additional_contexts: {litestream: "service:litestream"}
+    network_mode: "service:nats-a"
+    environment: {NODE: "a"}
+    command: ["failover", "run", "/config/a.json"]
+  node-b:
+    <<: *node
+    network_mode: "service:nats-b"
+    environment: {NODE: "b"}
+    command: ["failover", "run", "/config/b.json"]
+  net-c:
+    <<: *node
+    network_mode: "service:nats-c"
+    command: ["sleep", "infinity"]
+
+  dns:
+    <<: *node
+    networks: ["net"]
+    command: ["python3", "-u", "/stand/dns.py"]
+
+networks:
+  net: {}
