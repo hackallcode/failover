@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "failover"
-version = "0.2.0"
+version = "0.3.0"
 description = "Failover of single-writer services over NATS JetStream: one leader per service, its SQLite databases replicated as snapshots in a KV bucket."
 requires-python = ">=3.11"
 license = "Apache-2.0"
