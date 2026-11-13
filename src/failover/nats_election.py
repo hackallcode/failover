@@ -22,8 +22,6 @@ from failover.buckets import bucket, exact, stream
 from failover.domain import Desired, Position
 
 HISTORY_LENGTH = 50
-# A watch misses a write that lands while it sets up: a request it has not seen change this long is read again.
-RESYNC_EVERY = 30
 WRONG_LAST_SEQUENCE = (10071, 10164)
 
 log = logging.getLogger(__name__)
@@ -66,7 +64,10 @@ class NatsElection:
         watcher = await self.kv.watch(key)
         try:
             async for entry in watcher:
-                self.pushed[key] = Pushed(entry.value if entry else None, time.monotonic())
+                if entry is not None:
+                    self.pushed[key] = Pushed(entry.value, time.monotonic())
+                elif key not in self.pushed:  # the marker after the current values: the key has none
+                    self.pushed[key] = Pushed(None, time.monotonic())
         finally:
             await watcher.stop()
 
@@ -145,15 +146,13 @@ class NatsElection:
 
     async def desired(self) -> Desired | None:
         pushed = self.latest(self.k_desired)
-        if pushed is not None and time.monotonic() - pushed.at < RESYNC_EVERY:
+        if pushed is not None:
             value = pushed.value
         else:
             try:
                 value = (await self.kv.get(self.k_desired)).value
             except KeyNotFoundError:
-                value = None
-            if self.watching is not None:
-                self.pushed[self.k_desired] = Pushed(value, time.monotonic())
+                return None
         if not value:
             return None
         d = json.loads(value)

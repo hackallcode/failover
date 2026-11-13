@@ -1,5 +1,4 @@
 import asyncio
-import time
 import uuid
 
 import pytest
@@ -8,7 +7,7 @@ from nats.js.errors import BucketNotFoundError, NotFoundError
 
 from failover.agent import LeaseLost, RevisionMoved
 from failover.domain import Desired, Position
-from failover.nats_election import RESYNC_EVERY, NatsElection
+from failover.nats_election import NatsElection
 
 
 async def soon(read, expected, timeout=5):
@@ -204,11 +203,12 @@ async def test_a_dead_watch_starts_over(js):
     assert not b.watching.done()
 
 
-async def test_a_request_the_watch_missed_is_read_again(js, monkeypatch):
-    a, b = await pair(js)
-    b.watching.cancel()
-    b.watching = asyncio.create_task(asyncio.sleep(3600))
-    await a.request(Desired("b", at=100))
-    assert await b.desired() is None
-    monkeypatch.setattr(time, "monotonic", lambda: b.pushed[b.k_desired].at + RESYNC_EVERY)
-    assert await b.desired() == Desired("b", at=100)
+async def test_a_restarted_agent_sees_the_lease_it_left(js):
+    service = f"svc{uuid.uuid4().hex[:8]}"
+    old = await NatsElection.open(js, service, "a", lease_ttl=30, replicas=1)
+    await watching(old)
+    await old.acquire()
+    old.watching.cancel()
+    new = await NatsElection.open(js, service, "a", lease_ttl=30, replicas=1)
+    await watching(new)
+    assert await new.holder() == "a"
