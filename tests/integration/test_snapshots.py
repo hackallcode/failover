@@ -249,3 +249,21 @@ async def test_shipping_starts_over_after_the_bucket_failed_to_answer(js, tmp_pa
     await leader.replicate()
     await eventually(lambda: leader.local().get("main"))
     await leader.stop_replicating(graceful=False)
+
+
+async def test_a_standby_that_cannot_write_its_copy_says_why_and_follows_again(js, tmp_path, caplog):
+    service = f"svc{uuid.uuid4().hex[:8]}"
+    leader, standby = await node(js, service, tmp_path / "a"), await node(js, service, tmp_path / "b")
+    database(leader.databases[0].path, [1])
+    await leader.replicate()
+    await eventually(lambda: leader.local().get("main"))
+    standby.databases[0].path.parent.rmdir()
+
+    await standby.follow()
+    await eventually(lambda: standby.following.done())
+    await standby.follow()
+    assert "standby: FileNotFoundError" in caplog.text
+    standby.databases[0].path.parent.mkdir()
+    await eventually(lambda: standby.standby() == leader.local())
+    await standby.stop_following()
+    await leader.stop_replicating(graceful=False)

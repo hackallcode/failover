@@ -227,7 +227,11 @@ class SnapshotReplica:
             os.replace(version_file(db.standby), version_file(db.path))
 
     async def follow(self) -> None:
-        if self.following is None or self.following.done():
+        if self.following is not None and self.following.done():
+            if not self.following.cancelled() and self.following.exception():
+                log.warning("standby: %r", self.following.exception())
+            self.following = None
+        if self.following is None:
             self.following = asyncio.create_task(self.keep_standby())
 
     async def keep_standby(self) -> None:
