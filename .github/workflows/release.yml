@@ -21,6 +21,7 @@ jobs:
           sha256sum litestream-linux-* > litestream.sha256
       - uses: softprops/action-gh-release@v2
         with:
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             litestream-linux-*
             litestream.sha256
