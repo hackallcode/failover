@@ -234,3 +234,18 @@ async def test_an_image_a_day_old_is_replaced_by_the_next_change(js, tmp_path, m
     padded(path, [100])
     await leader.ship_once({})
     assert (await leader.latest(leader.databases[0]))[1] == leader.shipped_revisions["main"] > image_revision
+
+
+async def test_shipping_starts_over_after_the_bucket_failed_to_answer(js, tmp_path, monkeypatch):
+    leader = await node(js, f"svc{uuid.uuid4().hex[:8]}", tmp_path / "a")
+    database(leader.databases[0].path, [1])
+    latest_delta = leader.latest_delta
+
+    async def times_out(db):
+        monkeypatch.setattr(leader, "latest_delta", latest_delta)
+        raise TimeoutError()
+
+    monkeypatch.setattr(leader, "latest_delta", times_out)
+    await leader.replicate()
+    await eventually(lambda: leader.local().get("main"))
+    await leader.stop_replicating(graceful=False)

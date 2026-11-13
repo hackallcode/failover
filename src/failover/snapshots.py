@@ -271,16 +271,17 @@ class SnapshotReplica:
             self.uploading = asyncio.create_task(self.ship_changes())
 
     async def load(self) -> None:
-        """What the bucket holds, which this node's writes then build on."""
-        self.shipped_revisions = {}
+        """What the bucket holds, which this node's writes then build on; all of it or, on a failure, none."""
+        bases, image_revisions, delta_revisions, versions = {}, {}, {}, {}
         for db in self.databases:
-            image, revision = await self.latest(db)
-            self.image_revisions[db.name] = revision
-            delta, self.delta_revisions[db.name] = await self.latest_delta(db)
-            self.bases[db.name] = (Base(zlib.decompress(image), revision, len(image), time.monotonic())
-                                   if image else None)
-            version = self.delta_revisions[db.name] if image and delta and delta_base(delta) == revision else revision
-            self.shipped_revisions[db.name] = version
+            image, image_revisions[db.name] = await self.latest(db)
+            delta, delta_revisions[db.name] = await self.latest_delta(db)
+            bases[db.name] = (Base(zlib.decompress(image), image_revisions[db.name], len(image), time.monotonic())
+                              if image else None)
+            current = image and delta and delta_base(delta) == image_revisions[db.name]
+            versions[db.name] = delta_revisions[db.name] if current else image_revisions[db.name]
+        self.bases, self.image_revisions, self.delta_revisions = bases, image_revisions, delta_revisions
+        self.shipped_revisions = versions
 
     async def ship_changes(self) -> None:
         shipped: dict[str, tuple] = {}
