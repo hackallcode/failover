@@ -2,6 +2,7 @@ import asyncio
 import uuid
 
 import pytest
+from nats.js.api import KeyValueConfig
 from nats.js.errors import BucketNotFoundError, NotFoundError
 
 from failover.agent import LeaseLost, RevisionMoved
@@ -127,3 +128,11 @@ async def test_release_mine_frees_only_this_nodes_lease(js):
     assert await a.holder() == "a"
     await a.release_mine()
     assert await b.acquire()
+
+
+async def test_a_lease_bucket_of_an_earlier_agent_gets_direct_reads(js):
+    service = f"svc{uuid.uuid4().hex[:8]}"
+    await js.create_key_value(config=KeyValueConfig(bucket=f"lease-{service}", ttl=30, history=1))
+    election = await NatsElection.open(js, service, "a", lease_ttl=30, replicas=1)
+    assert (await js.stream_info(f"KV_lease-{service}")).config.allow_direct
+    assert await election.acquire() and await election.holder() == "a"

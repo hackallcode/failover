@@ -9,20 +9,14 @@ import time
 
 from nats.js import JetStreamContext
 from nats.js.api import KeyValueConfig
-from nats.js.errors import BucketNotFoundError, KeyNotFoundError, KeyWrongLastSequenceError, NotFoundError
+from nats.js.errors import KeyNotFoundError, KeyWrongLastSequenceError, NotFoundError
 from nats.js.kv import KeyValue
 
 from failover.agent import LeaseLost, RevisionMoved
+from failover.buckets import bucket
 from failover.domain import Desired, Position
 
 HISTORY_LENGTH = 50
-
-
-async def bucket(js: JetStreamContext, config: KeyValueConfig) -> KeyValue:
-    try:
-        return await js.key_value(config.bucket)
-    except BucketNotFoundError:
-        return await js.create_key_value(config=config)
 
 
 class NatsElection:
@@ -37,13 +31,14 @@ class NatsElection:
     @classmethod
     async def open(cls, js: JetStreamContext, service: str, node: str, lease_ttl: float, replicas: int):
         leases = await bucket(js, KeyValueConfig(bucket=f"lease-{service}", ttl=lease_ttl, history=1,
-                                                 replicas=replicas))
+                                                 replicas=replicas, direct=True))
         # A shorter expiry than the TTL agents fence by would free the lease while its holder still serves.
         info = await js.stream_info(f"KV_lease-{service}")
         if info.config.max_age != lease_ttl:
             info.config.max_age = lease_ttl
             await js.update_stream(info.config)
-        state = await bucket(js, KeyValueConfig(bucket=cls.STATE_BUCKET, history=1, replicas=replicas))
+        state = await bucket(js, KeyValueConfig(bucket=cls.STATE_BUCKET, history=1, replicas=replicas,
+                                                         direct=True))
         return cls(js, leases, state, service, node)
 
     @classmethod

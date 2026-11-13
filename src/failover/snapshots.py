@@ -17,9 +17,10 @@ from pathlib import Path
 
 from nats.js import JetStreamContext
 from nats.js.api import KeyValueConfig
-from nats.js.errors import BucketNotFoundError, KeyWrongLastSequenceError, NotFoundError
+from nats.js.errors import KeyWrongLastSequenceError, NotFoundError
 from nats.js.kv import KeyValue
 
+from failover.buckets import bucket
 from failover.domain import Txids
 
 log = logging.getLogger(__name__)
@@ -85,13 +86,6 @@ def fingerprint(path: Path) -> tuple:
         except FileNotFoundError:
             stats.append(None)
     return tuple(stats)
-
-
-async def bucket(js: JetStreamContext, config: KeyValueConfig) -> KeyValue:
-    try:
-        return await js.key_value(config.bucket)
-    except BucketNotFoundError:
-        return await js.create_key_value(config=config)
 
 
 class SnapshotReplica:
