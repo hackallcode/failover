@@ -17,12 +17,12 @@ def test_hand_over_only_to_another_node_on_a_fresh_request():
 
 
 def test_campaign_waits_for_the_requested_node_and_after_handing_over():
-    assert may_campaign(None, "a", now=100, valid_for=120, handed_over_at=None, yield_for=15)
-    assert not may_campaign(Desired("b", at=90), "a", now=100, valid_for=120, handed_over_at=None, yield_for=15)
-    assert may_campaign(Desired("a", at=90), "a", now=100, valid_for=120, handed_over_at=None, yield_for=15)
-    assert may_campaign(Desired("b", at=-100), "a", now=100, valid_for=120, handed_over_at=None, yield_for=15)
-    assert not may_campaign(None, "a", now=100, valid_for=120, handed_over_at=90, yield_for=15)
-    assert may_campaign(None, "a", now=106, valid_for=120, handed_over_at=90, yield_for=15)
+    assert may_campaign(None, "a", now=100, valid_for=120, yielded_at=None, yield_for=15)
+    assert not may_campaign(Desired("b", at=90), "a", now=100, valid_for=120, yielded_at=None, yield_for=15)
+    assert may_campaign(Desired("a", at=90), "a", now=100, valid_for=120, yielded_at=None, yield_for=15)
+    assert may_campaign(Desired("b", at=-100), "a", now=100, valid_for=120, yielded_at=None, yield_for=15)
+    assert not may_campaign(None, "a", now=100, valid_for=120, yielded_at=90, yield_for=15)
+    assert may_campaign(None, "a", now=106, valid_for=120, yielded_at=90, yield_for=15)
 
 
 def test_takeover_source():

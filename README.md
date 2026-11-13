@@ -83,7 +83,8 @@ One JSON file per service and node:
   renewals and replica writes commit without a hop to a busy server; `false` on a node too loaded to lead them.
 - `tick` (1 s): how often the agent checks the lease, the request and the service.
 - `desired_valid` (120 s): how long a switch request stands; meanwhile no other node campaigns.
-- `yield_for` (15 s): after handing over or failing to take over, the node does not campaign for this long.
+- `yield_for` (15 s): after handing over, failing to take over or fencing, the node does not campaign for this
+  long, so a healthy node takes over first.
 - `follow_interval` (10 s): how often a standby polls the replica.
 - `litestream` (`litestream`): the Litestream binary.
 

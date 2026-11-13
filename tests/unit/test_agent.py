@@ -95,6 +95,7 @@ async def test_re_elected_leader_keeps_its_newer_local_database(world):
     await a.agent.check_fence()
     assert not a.service.up
     cluster.lease = None
+    clock.now += 20  # past yield_for: a fenced node lets others go first
     await a.agent.tick()
     assert a.service.up and a.replica.restores == 0
     assert a.replica.local() == {"main": 6}
@@ -493,3 +494,19 @@ async def test_the_leader_reports_how_long_its_writes_are_not_replicated(world):
     clock.now += 10
     await a.agent.tick()
     assert a.agent.status.replication_lag == 0
+
+
+async def test_a_fenced_leader_leaves_the_lease_to_a_healthy_node(world):
+    cluster, _, _, clock, nodes = world
+    a, b = nodes["a"], nodes["b"]
+    await a.agent.tick()
+    a.replica.write("main", 5)
+    await a.agent.tick()
+    await a.agent.fence("the lease is running out")
+    await a.agent.tick()
+    assert not a.agent.leading and cluster.lease[0] == "a"
+    cluster.lease = None
+    clock.now += 1
+    await a.agent.tick()
+    await b.agent.tick()
+    assert not a.agent.leading and b.agent.leading

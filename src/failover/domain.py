@@ -47,8 +47,8 @@ def hand_over_to(desired: Desired | None, me: str, now: float, valid_for: float)
 
 
 def may_campaign(desired: Desired | None, me: str, now: float, valid_for: float,
-                 handed_over_at: float | None, yield_for: float) -> bool:
-    if handed_over_at is not None and now - handed_over_at < yield_for:
+                 yielded_at: float | None, yield_for: float) -> bool:
+    if yielded_at is not None and now - yielded_at < yield_for:
         return False
     return not (desired_fresh(desired, now, valid_for) and desired.node != me)
 

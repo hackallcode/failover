@@ -149,7 +149,8 @@ class Agent:
         self.confirmed_sent = 0.0
         self.position_revision = 0
         self.position_checked = float("-inf")
-        self.handed_over_at: float | None = None
+        self.yielded_at: float | None = None
+        self.lease_may_be_from_an_earlier_run = True
         self.behind_since: float | None = None
         self.ticked_at = clock()
         self.lock = asyncio.Lock()
@@ -185,6 +186,7 @@ class Agent:
         if self.term is None:
             return
         term, self.term = self.term, None
+        self.yielded_at = self.wall()
         self.status.action = Action.FENCED
         log.warning("fence (term %s): %s", term, why)
         await self.stop_serving()
@@ -244,12 +246,13 @@ class Agent:
             await self.stop_serving()
         await self.replica.follow()
         self.status.leader = await self.election.holder()
-        if self.status.leader == self.s.node:
+        if self.status.leader == self.s.node and self.lease_may_be_from_an_earlier_run:
             await self.election.release_mine()
             self.status.leader = None
+        self.lease_may_be_from_an_earlier_run = False
         if self.status.leader is not None or not self.s.candidate:
             return
-        if not may_campaign(desired, self.s.node, self.wall(), self.s.desired_valid, self.handed_over_at,
+        if not may_campaign(desired, self.s.node, self.wall(), self.s.desired_valid, self.yielded_at,
                             self.s.yield_for):
             return
         sent = self.clock()
@@ -331,7 +334,7 @@ class Agent:
 
     async def give_up(self, term: int, why: str, desired: Desired | None) -> None:
         self.term = None
-        self.handed_over_at = self.wall()
+        self.yielded_at = self.wall()
         self.status.action = Action.STANDBY
         await self.stop_serving()
         await self.try_record(f"did not take over: {why}")
@@ -408,7 +411,7 @@ class Agent:
         if self.term != term:
             return
         self.term = None
-        self.handed_over_at = self.wall()
+        self.yielded_at = self.wall()
         await self.election.release(self.revision)
         await self.try_record(f"handed over to {to} on request")
 
