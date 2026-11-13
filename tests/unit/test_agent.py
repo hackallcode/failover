@@ -376,7 +376,7 @@ async def test_a_request_for_the_leader_itself_is_cleared(world):
     assert cluster.desired is None and a.agent.leading
 
 
-async def test_a_failed_take_over_clears_the_request_for_it(world):
+async def test_a_switch_request_outlives_a_failed_take_over(world):
     cluster, _, _, clock, nodes = world
     a, b = nodes["a"], nodes["b"]
     await a.agent.tick()
@@ -386,7 +386,13 @@ async def test_a_failed_take_over_clears_the_request_for_it(world):
     await a.agent.tick()
     b.replica.short = True
     await b.agent.tick()
-    assert not b.agent.leading and cluster.desired is None
+    assert not b.agent.leading and cluster.desired.node == "b"
+    clock.now += 20
+    await a.agent.tick()
+    assert not a.agent.leading
+    b.replica.short = False
+    await b.agent.tick()
+    assert b.agent.leading and cluster.desired is None
 
 
 async def test_a_stale_request_is_not_reported(world):

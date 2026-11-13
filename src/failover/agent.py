@@ -266,7 +266,7 @@ class Agent:
             await self.take_over(term, desired)
         except Exception as e:
             if self.term == term:
-                await self.give_up(term, f"take-over failed: {e!r}", desired)
+                await self.give_up(term, f"take-over failed: {e!r}")
             raise
 
     async def take_over(self, term: int, desired: Desired | None) -> None:
@@ -286,16 +286,16 @@ class Agent:
         elif source is Source.RESTORE:
             restored = await self.replica.restore(set(goal or {}))
             if restored is None or not restore_serves(goal, restored):
-                await self.give_up(term, f"restore got {restored}, short of {goal}", desired)
+                await self.give_up(term, f"restore got {restored}, short of {goal}")
                 return
         if self.term != term:
             return
         held = highest(goal or {}, restored, self.replica.local() if source is Source.LOCAL else {})
         if not await self.replica.ready():
-            await self.give_up(term, "the replica has no stream leader yet", desired)
+            await self.give_up(term, "the replica has no stream leader yet")
             return
         if not await self.claim_position(held, term):
-            await self.give_up(term, "another node recorded a position meanwhile", desired)
+            await self.give_up(term, "another node recorded a position meanwhile")
             return
         await self.dns.point_here()
         await self.replica.replicate()
@@ -332,13 +332,12 @@ class Agent:
         self.status.position = claimed
         return True
 
-    async def give_up(self, term: int, why: str, desired: Desired | None) -> None:
+    async def give_up(self, term: int, why: str) -> None:
         self.term = None
         self.yielded_at = self.wall()
         self.status.action = Action.STANDBY
         await self.stop_serving()
         await self.try_record(f"did not take over: {why}")
-        await self.clear_request_for_me(desired)
         try:
             await self.election.release(self.revision)
         except Exception as e:
