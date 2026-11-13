@@ -106,3 +106,22 @@ async def test_a_leader_handing_over_ships_its_last_change(js, tmp_path):
     await leader.stop_replicating(graceful=True)
     await other.restore({"main"})
     assert rows(other.databases[0].path) == [1]
+
+
+async def test_a_replicating_leader_knows_its_revisions_without_fetching_snapshots(js, tmp_path, monkeypatch):
+    service = f"svc{uuid.uuid4().hex[:8]}"
+    leader = await node(js, service, tmp_path / "a")
+    database(leader.databases[0].path, [1])
+    await leader.replicate()
+    await eventually(lambda: leader.local().get("main"))
+    fetched = []
+    get_msg = js.get_msg
+
+    async def counting(*args, **kwargs):
+        fetched.append(args)
+        return await get_msg(*args, **kwargs)
+
+    monkeypatch.setattr(js, "get_msg", counting)
+    assert await leader.replicated() == leader.local()
+    assert not fetched
+    await leader.stop_replicating(graceful=False)

@@ -101,6 +101,7 @@ class SnapshotReplica:
         self.uploading: asyncio.Task | None = None
         self.following: asyncio.Task | None = None
         self.unshipped_since: float | None = None
+        self.shipped_revisions: dict[str, int] | None = None
 
     @classmethod
     async def open(cls, js: JetStreamContext, service: str, databases: list[Database], replicas: int):
@@ -125,6 +126,10 @@ class SnapshotReplica:
                 if db.standby.exists() and (v := read_version(db.standby)) is not None}
 
     async def replicated(self) -> Txids:
+        """While this node replicates, what it wrote: a CAS write admits no other writer, and reading the stream
+        would fetch every snapshot whole."""
+        if self.shipped_revisions is not None and self.uploading is not None and not self.uploading.done():
+            return {name: revision for name, revision in self.shipped_revisions.items() if revision}
         txids: Txids = {}
         for db in self.databases:
             _, revision = await self.latest(db)
@@ -193,12 +198,12 @@ class SnapshotReplica:
 
     async def ship_changes(self) -> None:
         shipped: dict[str, tuple] = {}
-        revisions: dict[str, int] | None = None
+        self.shipped_revisions = None
         while True:
             try:
-                if revisions is None:
-                    revisions = {db.name: (await self.latest(db))[1] for db in self.databases}
-                await self.ship_once(shipped, revisions)
+                if self.shipped_revisions is None:
+                    self.shipped_revisions = {db.name: (await self.latest(db))[1] for db in self.databases}
+                await self.ship_once(shipped, self.shipped_revisions)
             except KeyWrongLastSequenceError:
                 raise
             except Exception as e:
