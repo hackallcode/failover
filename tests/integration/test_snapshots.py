@@ -3,13 +3,14 @@ import os
 import sqlite3
 import time
 import uuid
+import zlib
 
 import pytest
 from nats.js.api import KeyValueConfig
 from nats.js.errors import KeyWrongLastSequenceError
 
 from failover.buckets import bucket
-from failover.snapshots import REBASE_EVERY, Database, SnapshotReplica
+from failover.snapshots import REBASE_EVERY, Database, SnapshotReplica, snapshot
 
 
 def database(path, rows):
@@ -267,3 +268,18 @@ async def test_a_standby_that_cannot_write_its_copy_says_why_and_follows_again(j
     await eventually(lambda: standby.standby() == leader.local())
     await standby.stop_following()
     await leader.stop_replicating(graceful=False)
+
+
+async def test_a_hand_over_ships_past_a_write_the_cancel_cut_off(js, tmp_path):
+    leader = await node(js, f"svc{uuid.uuid4().hex[:8]}", tmp_path / "a")
+    path = leader.databases[0].path
+    padded(path, range(100))
+    await leader.replicate()
+    await eventually(lambda: leader.local().get("main"))
+    await leader.stop_replicating(graceful=False)
+    await leader.write(leader.key(leader.databases[0]), zlib.compress(snapshot(path)), leader.image_revisions["main"])
+    padded(path, [100])
+
+    await leader.stop_replicating(graceful=True)
+    await leader.restore({"main"})
+    assert rows(path) == list(range(101))

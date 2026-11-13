@@ -6,6 +6,9 @@ keep a standby copy of its databases and stay stopped.
 
 - **Election**: a key in the JetStream KV bucket `failover`; each write expires after the writer's lease TTL. Every
   write compares the key's revision, so only the holder renews it; the term is the revision that created it.
+  Agents learn the holder and switch requests from a watch on their keys rather than reading them every tick: any
+  replica answers a read, so each would cross a route. A lease unrenewed for a TTL counts as expired, and a lease
+  is taken only after a read from the stream leader.
 - **Fencing**: a leader stops the service once 70% of the TTL passed since its last confirmed renewal was sent. The
   key expires on the server no earlier than a full TTL after that send, so no other node can hold it while the old
   leader still serves.

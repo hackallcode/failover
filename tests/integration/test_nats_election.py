@@ -1,4 +1,5 @@
 import asyncio
+import time
 import uuid
 
 import pytest
@@ -7,13 +8,29 @@ from nats.js.errors import BucketNotFoundError, NotFoundError
 
 from failover.agent import LeaseLost, RevisionMoved
 from failover.domain import Desired, Position
-from failover.nats_election import NatsElection
+from failover.nats_election import RESYNC_EVERY, NatsElection
+
+
+async def soon(read, expected, timeout=5):
+    """Pushed values arrive a moment after the write."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while (value := await read()) != expected:
+        assert asyncio.get_running_loop().time() < deadline, f"{value!r} != {expected!r}"
+        await asyncio.sleep(0.05)
+
+
+async def watching(*elections, timeout=5):
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not all(len(e.pushed) == 2 for e in elections):
+        assert asyncio.get_running_loop().time() < deadline, "the watch never answered"
+        await asyncio.sleep(0.05)
 
 
 async def pair(js, ttl=30):
     service = f"svc{uuid.uuid4().hex[:8]}"
     a = await NatsElection.open(js, service, "a", lease_ttl=ttl, replicas=1)
     b = await NatsElection.open(js, service, "b", lease_ttl=ttl, replicas=1)
+    await watching(a, b)
     return a, b
 
 
@@ -21,13 +38,14 @@ async def test_one_holder_and_terms_grow(js):
     a, b = await pair(js)
     term = await a.acquire()
     assert term and await b.acquire() is None
-    assert await b.holder() == "a"
+    await soon(b.holder, "a")
     revision = await a.renew(term)
     assert revision > term
     await a.release(revision)
-    assert await b.holder() is None
+    await soon(b.holder, None)
     term2 = await b.acquire()
-    assert term2 > revision and await b.holder() == "b"
+    assert term2 > revision
+    await soon(b.holder, "b")
 
 
 async def test_renew_tells_a_moved_revision_from_a_lost_lease(js):
@@ -78,13 +96,13 @@ async def test_desired_is_cleared_only_if_unchanged(js):
     a, b = await pair(js)
     first = Desired("b", at=100)
     await a.request(first)
-    assert await b.desired() == first
+    await soon(b.desired, first)
     second = Desired("a", at=200)
     await a.request(second)
     await b.clear_desired(first)
-    assert await b.desired() == second
+    await soon(b.desired, second)
     await a.clear_desired(second)
-    assert await b.desired() is None
+    await soon(b.desired, None)
 
 
 async def test_history_keeps_the_newest(js):
@@ -144,5 +162,53 @@ async def test_a_bucket_of_an_earlier_agent_gets_direct_reads(js):
     await without_bucket(js)
     await js.create_key_value(config=KeyValueConfig(bucket=NatsElection.BUCKET, history=1))
     election = await NatsElection.open(js, f"svc{uuid.uuid4().hex[:8]}", "a", lease_ttl=30, replicas=1)
+    await watching(election)
     assert (await js.stream_info(f"KV_{NatsElection.BUCKET}")).config.allow_direct
-    assert await election.acquire() and await election.holder() == "a"
+    assert await election.acquire()
+    await soon(election.holder, "a")
+
+
+async def test_the_lease_and_the_request_are_pushed_not_read(js, monkeypatch):
+    a, b = await pair(js)
+    await a.acquire()
+    await a.request(Desired("b", at=100))
+    await soon(b.holder, "a")
+    await soon(b.desired, Desired("b", at=100))
+
+    async def no_reads(*args, **kwargs):
+        raise AssertionError("read the bucket")
+
+    monkeypatch.setattr(b.kv, "get", no_reads)
+    for _ in range(20):
+        assert await b.holder() == "a" and await b.desired() == Desired("b", at=100)
+
+
+async def test_an_unrenewed_lease_reads_free_after_a_ttl_but_is_not_taken_early(js):
+    service = f"svc{uuid.uuid4().hex[:8]}"
+    holder = await NatsElection.open(js, service, "a", lease_ttl=30, replicas=1)
+    reader = await NatsElection.open(js, service, "b", lease_ttl=1, replicas=1)
+    await watching(holder, reader)
+    await holder.acquire()
+    await soon(reader.holder, "a")
+    await asyncio.sleep(1.1)
+    assert await reader.holder() is None
+    assert await reader.acquire() is None
+
+
+async def test_a_dead_watch_starts_over(js):
+    a, b = await pair(js)
+    b.watching.cancel()
+    await asyncio.sleep(0)
+    await a.acquire()
+    await soon(b.holder, "a")
+    assert not b.watching.done()
+
+
+async def test_a_request_the_watch_missed_is_read_again(js, monkeypatch):
+    a, b = await pair(js)
+    b.watching.cancel()
+    b.watching = asyncio.create_task(asyncio.sleep(3600))
+    await a.request(Desired("b", at=100))
+    assert await b.desired() is None
+    monkeypatch.setattr(time, "monotonic", lambda: b.pushed[b.k_desired].at + RESYNC_EVERY)
+    assert await b.desired() == Desired("b", at=100)

@@ -360,12 +360,12 @@ class SnapshotReplica:
             raise
 
     async def stop_replicating(self, graceful: bool) -> None:
-        """Handing over, every change has to reach the bucket: a failure keeps the lease for another try."""
+        """Handing over, every change has to reach the bucket: a failure keeps the lease for another try. A write cut
+        off by the cancel may have landed, so the bucket is read again first."""
         await cancel(self.uploading)
         self.uploading = None
         if graceful:
-            if self.shipped_revisions is None:
-                await self.load()
+            await self.load()
             await self.ship_once({}, strict=True)
 
 
