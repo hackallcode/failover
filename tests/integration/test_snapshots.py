@@ -3,8 +3,10 @@ import sqlite3
 import uuid
 
 import pytest
+from nats.js.api import KeyValueConfig
 from nats.js.errors import KeyWrongLastSequenceError
 
+from failover.buckets import bucket
 from failover.snapshots import Database, SnapshotReplica
 
 
@@ -22,7 +24,8 @@ def rows(path):
 
 async def node(js, service, directory):
     directory.mkdir(exist_ok=True)
-    return await SnapshotReplica.open(js, service, [Database("main", directory / "main.db")], replicas=1)
+    kv = await bucket(js, KeyValueConfig(bucket="failover", history=1, direct=True))
+    return SnapshotReplica(js, kv, "failover", service, [Database("main", directory / "main.db")])
 
 
 async def eventually(check, timeout=10):

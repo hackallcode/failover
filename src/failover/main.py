@@ -125,9 +125,8 @@ async def run(config: Config) -> None:
     while True:
         try:
             election = await open_election(config, js)
-            replica = await SnapshotReplica.open(
-                js, config.service, [Database(name, path) for name, path in config.databases.items()],
-                config.nats.replicas)
+            replica = SnapshotReplica(js, election.kv, NatsElection.BUCKET, config.service,
+                                      [Database(name, path) for name, path in config.databases.items()])
             break
         except Exception as e:  # the cluster may still be electing its leaders
             log.warning("setup: %r", e)
@@ -135,9 +134,8 @@ async def run(config: Config) -> None:
     settings = Settings(node=config.node, candidate=config.candidate, lease_ttl=config.lease_ttl, tick=config.tick,
                         desired_valid=config.desired_valid, yield_for=config.yield_for, held=held(config),
                         standby_wait=STANDBY_WAIT)
-    streams = [f"KV_{election.lease_bucket}", f"KV_{NatsElection.STATE_BUCKET}", replica.stream]
     agent = Agent(settings, election, replica, service(config), dns(config),
-                  placement=StreamLeaders(nc, streams, config.nats.server_name or config.node)
+                  placement=StreamLeaders(nc, [election.stream], config.nats.server_name or config.node)
                   if config.place_streams else None)
     async with asyncio.TaskGroup() as tasks:
         tasks.create_task(agent.run())

@@ -1,4 +1,4 @@
-"""SQLite databases of one service replicated as whole compressed snapshots, one key each in a NATS KV bucket.
+"""SQLite databases of one service replicated as whole compressed snapshots, one key each in the NATS KV bucket.
 
 The databases are small and change rarely: a snapshot per change costs a few kilobytes, where shipping a log
 through an object store lists the whole bucket on every operation. The version of a database is the revision of
@@ -16,18 +16,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from nats.js import JetStreamContext
-from nats.js.api import KeyValueConfig
 from nats.js.errors import KeyWrongLastSequenceError, NotFoundError
 from nats.js.kv import KeyValue
 
-from failover.buckets import bucket
 from failover.domain import Txids
 
 log = logging.getLogger(__name__)
 
 CHECK_EVERY = 1.0
 RESTORE_TIMEOUT = 30
-BUCKET_MAX_BYTES = 64 * 1024 * 1024
 # NATS's default max_payload: a snapshot travels as one message.
 SNAPSHOT_MAX_BYTES = 1024 * 1024
 
@@ -89,25 +86,23 @@ def fingerprint(path: Path) -> tuple:
 
 
 class SnapshotReplica:
-    def __init__(self, js: JetStreamContext, kv: KeyValue, name: str, databases: list[Database]):
-        self.js, self.kv, self.name, self.databases = js, kv, name, databases
-        self.stream = f"KV_{name}"
+    def __init__(self, js: JetStreamContext, kv: KeyValue, bucket: str, service: str, databases: list[Database]):
+        """Shares the service's bucket: a stream of its own would be another raft group heartbeating."""
+        self.js, self.kv, self.bucket, self.databases = js, kv, bucket, databases
+        self.prefix = f"{service}.snapshot."
+        self.stream = f"KV_{bucket}"
         self.uploading: asyncio.Task | None = None
         self.following: asyncio.Task | None = None
         self.unshipped_since: float | None = None
         self.shipped_revisions: dict[str, int] | None = None
 
-    @classmethod
-    async def open(cls, js: JetStreamContext, service: str, databases: list[Database], replicas: int):
-        name = f"replica-{service}"
-        kv = await bucket(js, KeyValueConfig(bucket=name, history=1, replicas=replicas, max_bytes=BUCKET_MAX_BYTES,
-                                             max_value_size=SNAPSHOT_MAX_BYTES))
-        return cls(js, kv, name, databases)
+    def key(self, db: Database) -> str:
+        return f"{self.prefix}{db.name}"
 
     async def latest(self, db: Database) -> tuple[bytes | None, int]:
         """From the stream leader: a direct get may come from a lagging replica."""
         try:
-            msg = await self.js.get_msg(self.stream, subject=f"$KV.{self.name}.{db.name}", direct=False)
+            msg = await self.js.get_msg(self.stream, subject=f"$KV.{self.bucket}.{self.key(db)}", direct=False)
         except NotFoundError:
             return None, 0
         return msg.data or None, msg.seq
@@ -172,8 +167,8 @@ class SnapshotReplica:
 
     async def keep_standby(self) -> None:
         """The bucket pushes each new snapshot: a standby never polls."""
-        paths = {db.name: db.standby for db in self.databases}
-        watcher = await self.kv.watch(">")
+        paths = {self.key(db): db.standby for db in self.databases}
+        watcher = await self.kv.watch(f"{self.prefix}>")
         try:
             async for entry in watcher:
                 if entry is None or entry.key not in paths or not entry.value:
@@ -217,7 +212,7 @@ class SnapshotReplica:
                 data = await asyncio.to_thread(snapshot, db.path)
                 if len(data) > SNAPSHOT_MAX_BYTES:
                     raise ValueError(f"{db.name}: a {len(data)}-byte snapshot exceeds {SNAPSHOT_MAX_BYTES}")
-                revision = await self.kv.update(db.name, data, last=revisions[db.name])
+                revision = await self.kv.update(self.key(db), data, last=revisions[db.name])
             except KeyWrongLastSequenceError:
                 log.error("%s: another node wrote a newer snapshot; this one stops shipping", db.name)
                 raise

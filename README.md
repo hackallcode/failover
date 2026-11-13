@@ -4,13 +4,13 @@ One writer at a time for services that keep their state in SQLite, across a few 
 the only quorum. Each server runs an agent per service; the agent that holds the service's lease runs it, the others
 keep a standby copy of its databases and stay stopped.
 
-- **Election**: a key in a JetStream KV bucket whose max age is the lease TTL. Every write compares the key's
-  revision, so only the holder renews it; the term is the revision that created it.
+- **Election**: a key in the JetStream KV bucket `failover`; each write expires after the writer's lease TTL. Every
+  write compares the key's revision, so only the holder renews it; the term is the revision that created it.
 - **Fencing**: a leader stops the service once 70% of the TTL passed since its last confirmed renewal was sent. The
   key expires on the server no earlier than a full TTL after that send, so no other node can hold it while the old
   leader still serves.
 - **State**: the leader checks its databases every second and, on a change, writes a compressed snapshot of each
-  changed one to its key in a KV bucket, comparing the key's revision, so a node that lost the lease cannot
+  changed one to its key in the same bucket, comparing the key's revision, so a node that lost the lease cannot
   overwrite a newer snapshot. Standbys watch the bucket and keep a copy as each snapshot arrives; nothing polls.
   The leader records the newest replicated revisions (the position) in KV; a new leader starts only from a
   database that reaches it: its own, if it wrote the position and is not behind it; a standby copy that caught up;
@@ -28,16 +28,14 @@ keep a standby copy of its databases and stay stopped.
 - A node never serves a database behind the recorded position. When no node can reach it (the replica is short
   and no standby has it), nobody takes over until an operator does.
 - Without a quorum nothing changes hands, and the leader fences.
-- A leader keeps serving while its lease stream has a quorum even if the replica's stream has no leader for a
-  while; what it commits then is lost if it dies before the replica recovers. The leader reports how long its
-  changes have not reached the replica (`failover_replication_lag_seconds`).
+- The leader reports how long its changes have not reached the replica (`failover_replication_lag_seconds`).
 - A node frozen past its lease (a paused VM, SIGSTOP) may write for a moment after it wakes up, before its agent
   notices and stops the service; those writes are lost. Applications that cannot check a fencing token cannot
   rule this out.
 
 ## Requirements
 
-- NATS server 2.10+ with JetStream, three or more servers. Set `ping_interval: "2s"` and `ping_max: 3`: by default
+- NATS server 2.11+ (per-message TTL) with JetStream, three or more servers. Set `ping_interval: "2s"` and `ping_max: 3`: by default
   a server that died without closing its connections is noticed only after minutes, and requests that land on it
   time out meanwhile.
 - Python 3.11+.
@@ -64,18 +62,17 @@ One JSON file per service and node:
 ```
 
 - `projects`: docker compose projects started in order and stopped in reverse; or `command`, one process.
-- `databases`: name → path; the name is stable across nodes and is the database's key in the bucket
-  `replica-<service>`.
+- `databases`: name → path; the name is stable across nodes, and the database's key in the bucket is
+  `<service>.snapshot.<name>`.
 - `nats`: `servers`, tried in order: put this node's own server first, so losing another server does not cut
   the leader off; `user` and `password_file` if the servers require them, `tls` (`ca`, `cert`, `key`) for client
   certificates, `server_name` if this node's NATS server is named differently from `node`.
-- `lease_ttl`: seconds; agents set the lease bucket's expiry to it on start. Raising it is safe on a running
-  cluster; to lower it, stop the agents of the service first, or a leader still fencing by the old TTL may serve
-  after its lease expired.
+- `lease_ttl`: seconds; each lease write expires after the writer's TTL, so changing it on a running cluster is
+  safe.
 - `hold_file`: while it exists (and is younger than 5 minutes) the leader keeps the lease but neither restarts the
   service nor hands it over, for a deploy that edits the stopped database.
 - `candidate: false`: follow and report, never lead.
-- `place_streams` (`true`): the leader pulls the leaders of its NATS streams onto its own server every 30 s, so
+- `place_streams` (`true`): the leader pulls the leader of the bucket's stream onto its own server every 30 s, so
   renewals and replica writes commit without a hop to a busy server; `false` on a node too loaded to lead them.
 - `tick` (1 s): how often the agent checks the lease, the request and the service.
 - `desired_valid` (120 s): how long a switch request stands; meanwhile no other node campaigns.
@@ -91,7 +88,7 @@ failover request <config> <node>  # ask <node> to lead
 failover state <config>           # leader, request, position, history
 ```
 
-`state` and `request` only read and write the service's keys; they never create or change buckets. A restarted
+`state` and `request` only read and write the service's keys; they never create or change the bucket. A restarted
 agent frees a lease left under its own name and campaigns again, so a leader's restart keeps it leading; a node
 that stays down leaves the lease to run out, and a standby takes over then.
 
