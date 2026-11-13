@@ -1,8 +1,7 @@
 {
   "service": "app",
   "node": "a",
-  "nats": {"servers": ["nats://127.0.0.1:4222", "nats://nats-b:4222", "nats://nats-c:4222"],
-           "litestream_url": "nats://127.0.0.1:4222", "replicas": 3},
+  "nats": {"servers": ["nats://127.0.0.1:4222", "nats://nats-b:4222", "nats://nats-c:4222"], "replicas": 3},
   "command": ["python3", "/stand/app.py"],
   "databases": {"main": "/data/app.db"},
   "dns": {"provider": "http", "names": ["app"], "ip": "a", "url": "http://dns:8053"},

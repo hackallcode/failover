@@ -20,13 +20,15 @@ from failover.compose import ComposeService
 from failover.process import ProcessService
 from failover.config import Config, load
 from failover.domain import Desired
-from failover.litestream import RESTORE_TIMEOUT, Database, Litestream
+from failover.snapshots import RESTORE_TIMEOUT, Database, SnapshotReplica
 from failover.nats_election import NatsElection, StreamLeaders
 
 log = logging.getLogger("failover")
 
 # A hold file older than this was left behind by a dead deploy and no longer counts.
 HOLD_MAX = 300
+# A standby receives each snapshot as it is written: a few seconds cover one in flight.
+STANDBY_WAIT = 5
 
 
 class HttpRecord:
@@ -65,8 +67,9 @@ async def connect(config: Config):
         context = ssl.create_default_context(cafile=str(config.nats.tls.ca))
         context.load_cert_chain(str(config.nats.tls.cert), str(config.nats.tls.key))
         options.update(tls=context)
-    nc = await nats.connect(servers=config.nats.servers, connect_timeout=2, max_reconnect_attempts=-1,
-                            reconnect_time_wait=1, ping_interval=2, max_outstanding_pings=2, **options)
+    nc = await nats.connect(servers=config.nats.servers, dont_randomize=True, connect_timeout=2,
+                            max_reconnect_attempts=-1, reconnect_time_wait=1, ping_interval=2, max_outstanding_pings=2,
+                            **options)
     return nc, nc.jetstream(timeout=2)
 
 
@@ -122,19 +125,17 @@ async def run(config: Config) -> None:
     while True:
         try:
             election = await open_election(config, js)
-            replica = await Litestream.open(
-                js, config.litestream, config.state_dir / "litestream.yml",
-                [Database(name, path) for name, path in config.databases.items()], config.service,
-                config.nats.litestream_url, config.nats.replicas, litestream_options(config), config.follow_interval)
+            replica = await SnapshotReplica.open(
+                js, config.service, [Database(name, path) for name, path in config.databases.items()],
+                config.nats.replicas)
             break
         except Exception as e:  # the cluster may still be electing its leaders
             log.warning("setup: %r", e)
             await asyncio.sleep(2)
     settings = Settings(node=config.node, candidate=config.candidate, lease_ttl=config.lease_ttl, tick=config.tick,
                         desired_valid=config.desired_valid, yield_for=config.yield_for, held=held(config),
-                        standby_wait=1.5 * config.follow_interval)
-    streams = [f"KV_{election.lease_bucket}", f"KV_{NatsElection.STATE_BUCKET}",
-               *(f"OBJ_{Database(name, path).bucket(config.service)}" for name, path in config.databases.items())]
+                        standby_wait=STANDBY_WAIT)
+    streams = [f"KV_{election.lease_bucket}", f"KV_{NatsElection.STATE_BUCKET}", replica.stream]
     agent = Agent(settings, election, replica, service(config), dns(config),
                   placement=StreamLeaders(nc, streams, config.nats.server_name or config.node)
                   if config.place_streams else None)
@@ -149,16 +150,6 @@ async def run(config: Config) -> None:
 
 def service(config: Config) -> ComposeService | ProcessService:
     return ProcessService(config.command) if config.command else ComposeService(config.projects)
-
-
-def litestream_options(config: Config) -> dict:
-    options = {}
-    if config.nats.user:
-        options.update(username=config.nats.user, password=config.nats.password_file.read_text().strip())
-    if config.nats.tls:
-        t = config.nats.tls
-        options.update({"tls": True, "root-cas": [str(t.ca)], "client-cert": str(t.cert), "client-key": str(t.key)})
-    return options
 
 
 async def stop(config: Config) -> None:

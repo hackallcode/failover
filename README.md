@@ -9,10 +9,13 @@ keep a standby copy of its databases and stay stopped.
 - **Fencing**: a leader stops the service once 70% of the TTL passed since its last confirmed renewal was sent. The
   key expires on the server no earlier than a full TTL after that send, so no other node can hold it while the old
   leader still serves.
-- **State**: [Litestream](https://litestream.io) replicates every database into its own JetStream object store
-  bucket. The leader records the newest replicated transaction (the position) in KV; a new leader starts only
-  from a database that reaches it: its own, if it wrote the position and is not behind it; a standby copy that
-  caught up; or a restore.
+- **State**: the leader checks its databases every second and, on a change, writes a compressed snapshot of each
+  changed one to its key in a KV bucket, comparing the key's revision, so a node that lost the lease cannot
+  overwrite a newer snapshot. Standbys watch the bucket and keep a copy as each snapshot arrives; nothing polls.
+  The leader records the newest replicated revisions (the position) in KV; a new leader starts only from a
+  database that reaches it: its own, if it wrote the position and is not behind it; a standby copy that caught up;
+  or the snapshot itself. Meant for small databases that change now and then: a snapshot travels as one NATS
+  message (1 MB by default).
 - **Traffic**: the leader points DNS records at itself (Cloudflare).
 - **Manual switch**: a request names the node to lead; the leader stops, ships the rest, records the position and
   frees the lease; the requested node takes it.
@@ -20,16 +23,14 @@ keep a standby copy of its databases and stay stopped.
 ## Guarantees and limits
 
 - Two nodes never serve the same service at once while the clocks on a node advance at about the same rate.
-- Replication is asynchronous: a leader that dies loses what Litestream had not shipped (its sync interval, 1s by
-  default). A leader cut off from the quorum keeps serving whoever can still reach it until it fences, and those
+- Replication is asynchronous: a leader that dies loses what changed since its last snapshot (up to a second). A leader cut off from the quorum keeps serving whoever can still reach it until it fences, and those
   writes are lost: up to 70% of the TTL.
 - A node never serves a database behind the recorded position. When no node can reach it (the replica is short
   and no standby has it), nobody takes over until an operator does.
 - Without a quorum nothing changes hands, and the leader fences.
 - A leader keeps serving while its lease stream has a quorum even if the replica's stream has no leader for a
-  while; what it commits then is lost if it dies before the replica recovers. Replication only starts once the
-  replica's streams have leaders, and a Litestream that writes no LTX for 30 s while the WAL grows is restarted:
-  Litestream can hang on NATS after a stream leader change.
+  while; what it commits then is lost if it dies before the replica recovers. The leader reports how long its
+  changes have not reached the replica (`failover_replication_lag_seconds`).
 - A node frozen past its lease (a paused VM, SIGSTOP) may write for a moment after it wakes up, before its agent
   notices and stops the service; those writes are lost. Applications that cannot check a fencing token cannot
   rule this out.
@@ -37,13 +38,8 @@ keep a standby copy of its databases and stay stopped.
 ## Requirements
 
 - NATS server 2.10+ with JetStream, three or more servers. Set `ping_interval: "2s"` and `ping_max: 3`: by default
-  a server that died without closing its connections is noticed only after minutes, and object store reads that
-  land on it time out meanwhile.
-- Litestream v0.5.18+ built against nats.go with the object store `Put` fix
-  ([nats-io/nats.go#2238](https://github.com/nats-io/nats.go/issues/2238), fix in
-  [#2239](https://github.com/nats-io/nats.go/pull/2239)): without it a `Put` during a stream
-  leader election can store chunks out of order and corrupt the replica. `litestream/Dockerfile` builds it until
-  releases carry the fix.
+  a server that died without closing its connections is noticed only after minutes, and requests that land on it
+  time out meanwhile.
 - Python 3.11+.
 
 ## Configuration
@@ -54,8 +50,7 @@ One JSON file per service and node:
 {
   "service": "app",
   "node": "a",
-  "nats": {"servers": ["nats://127.0.0.1:4222", "nats://b:4222", "nats://c:4222"],
-           "litestream_url": "nats://127.0.0.1:4222", "replicas": 3},
+  "nats": {"servers": ["nats://127.0.0.1:4222", "nats://b:4222", "nats://c:4222"], "replicas": 3},
   "projects": ["/opt/app", "/opt/app-panel"],
   "databases": {"main": "/opt/app/data/db.sqlite", "panel": "/opt/app-panel/data/panel.db"},
   "dns": {"provider": "cloudflare", "zone": "example.com", "names": ["app.example.com"], "ip": "192.0.2.1",
@@ -69,10 +64,11 @@ One JSON file per service and node:
 ```
 
 - `projects`: docker compose projects started in order and stopped in reverse; or `command`, one process.
-- `databases`: name → path; the name is stable across nodes and names the bucket `replica-<service>-<name>`.
-- `nats.litestream_url`: the server Litestream talks to (its NATS replica takes one URL); `user` and
-  `password_file` if the servers require them, `tls` (`ca`, `cert`, `key`) for client certificates,
-  `server_name` if this node's NATS server is named differently from `node`.
+- `databases`: name → path; the name is stable across nodes and is the database's key in the bucket
+  `replica-<service>`.
+- `nats`: `servers`, tried in order: put this node's own server first, so losing another server does not cut
+  the leader off; `user` and `password_file` if the servers require them, `tls` (`ca`, `cert`, `key`) for client
+  certificates, `server_name` if this node's NATS server is named differently from `node`.
 - `lease_ttl`: seconds; agents set the lease bucket's expiry to it on start. Raising it is safe on a running
   cluster; to lower it, stop the agents of the service first, or a leader still fencing by the old TTL may serve
   after its lease expired.
@@ -85,8 +81,6 @@ One JSON file per service and node:
 - `desired_valid` (120 s): how long a switch request stands; meanwhile no other node campaigns.
 - `yield_for` (15 s): after handing over, failing to take over or fencing, the node does not campaign for this
   long, so a healthy node takes over first.
-- `follow_interval` (10 s): how often a standby polls the replica.
-- `litestream` (`litestream`): the Litestream binary.
 
 ## Running
 

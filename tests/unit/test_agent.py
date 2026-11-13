@@ -475,7 +475,7 @@ async def test_no_replication_starts_before_the_replica_stream_has_a_leader(worl
     assert a.service.up and a.replica.replicating
 
 
-async def test_a_stalled_litestream_is_restarted(world):
+async def test_stalled_replication_is_restarted(world):
     _, _, _, _, nodes = world
     a = nodes["a"]
     await a.agent.tick()

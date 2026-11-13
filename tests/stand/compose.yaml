@@ -10,11 +10,6 @@ x-node: &node
   volumes: ["./node:/stand:ro", "./config:/config:ro"]
 
 services:
-  litestream:
-    build: "../../litestream"
-    image: "failover-litestream"
-    entrypoint: ["/litestream", "version"]
-
   nats-a:
     <<: *nats
     hostname: "nats-a"
@@ -36,7 +31,6 @@ services:
     build:
       context: "../.."
       dockerfile: "tests/stand/node/Dockerfile"
-      additional_contexts: {litestream: "service:litestream"}
     network_mode: "service:nats-a"
     environment: {NODE: "a"}
     command: ["failover", "run", "/config/a.json"]

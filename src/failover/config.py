@@ -19,7 +19,6 @@ class Tls:
 @dataclass(frozen=True)
 class Nats:
     servers: list[str]
-    litestream_url: str
     replicas: int = 3
     user: str | None = None
     password_file: Path | None = None
@@ -58,8 +57,6 @@ class Config:
     tick: float = 1
     desired_valid: float = 120
     yield_for: float = 15
-    litestream: str = "litestream"
-    follow_interval: float = 10
     place_streams: bool = True
     hold_file: Path | None = None
     api: Api | None = None
@@ -69,7 +66,7 @@ class Config:
 def load(path: Path) -> Config:
     try:
         raw = json.loads(path.read_text())
-        nats = Nats(servers=list(raw["nats"]["servers"]), litestream_url=raw["nats"]["litestream_url"],
+        nats = Nats(servers=list(raw["nats"]["servers"]),
                     replicas=int(raw["nats"].get("replicas", 3)), user=raw["nats"].get("user"),
                     password_file=_path(raw["nats"].get("password_file")), server_name=raw["nats"].get("server_name", ""),
                     tls=Tls(ca=Path(raw["nats"]["tls"]["ca"]), cert=Path(raw["nats"]["tls"]["cert"]),
@@ -85,7 +82,6 @@ def load(path: Path) -> Config:
             state_dir=Path(raw["state_dir"]), candidate=bool(raw.get("candidate", True)),
             lease_ttl=float(raw.get("lease_ttl", 15)), tick=float(raw.get("tick", 1)),
             desired_valid=float(raw.get("desired_valid", 120)), yield_for=float(raw.get("yield_for", 15)),
-            litestream=raw.get("litestream", "litestream"), follow_interval=float(raw.get("follow_interval", 10)),
             place_streams=bool(raw.get("place_streams", True)), hold_file=_path(raw.get("hold_file")), api=api,
             metrics_dir=_path(raw.get("metrics_dir")))
     except (OSError, ValueError, KeyError, TypeError) as e:

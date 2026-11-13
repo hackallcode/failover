@@ -22,6 +22,7 @@ def cluster():
     stand.up()
     leader = stand.wait_serving(90)
     assert leader, "nobody started serving"
+    assert stand.wait_streams_led_by(leader, 30), "the stream leaders stayed off the leader's server"
     yield leader
     if not os.environ.get("KEEP_STAND"):
         stand.down()

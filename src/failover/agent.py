@@ -14,7 +14,7 @@ log = logging.getLogger(__name__)
 
 RENEW_ATTEMPTS = 3
 STANDBY_POLL = 0.5
-LITESTREAM_STALL = 30
+REPLICATION_STALL = 30
 
 
 class LeaseLost(Exception):
@@ -63,10 +63,10 @@ class Replica(Protocol):
         """A lower bound: the replica may hold more by now."""
 
     def stall_seconds(self) -> float:
-        """How long the database has had writes Litestream has not turned into LTX."""
+        """How long the database has had changes that did not reach the replica."""
 
     async def ready(self) -> bool:
-        """Litestream started on a bucket whose stream has no leader yet hangs before its first sync."""
+        """The replica's stream has a leader, so writes can commit."""
 
     async def restore(self, required: set[str]) -> Txids | None: ...
 
@@ -362,8 +362,8 @@ class Agent:
                 return
         self.status.action = Action.SERVING
         stall = self.replica.stall_seconds()
-        if stall > LITESTREAM_STALL:
-            log.warning("litestream stalled for %.0fs: restarting it", stall)
+        if stall > REPLICATION_STALL:
+            log.warning("replication stalled for %.0fs: restarting it", stall)
             await self.replica.stop_replicating(graceful=False)
             await self.replica.replicate()
         await self.advance_position()

@@ -166,6 +166,24 @@ def wait_serving(timeout: float, other_than: str | None = None) -> str | None:
     return None
 
 
+def stream_leaders(via: str) -> set[str]:
+    script = ("import json, urllib.request\n"
+              "d = json.load(urllib.request.urlopen('http://127.0.0.1:8222/jsz?accounts=true&streams=true'))\n"
+              "print(json.dumps([s.get('cluster', {}).get('leader') for a in d['account_details']"
+              " for s in a['stream_detail']]))")
+    return set(json.loads(compose("exec", "-T", net_container(via), "python3", "-c", script)))
+
+
+def wait_streams_led_by(node: str, timeout: float) -> bool:
+    """The leader pulls the stream leaders to its server; until then a test is not starting from the usual state."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if stream_leaders(via=node) == {node}:
+            return True
+        time.sleep(1)
+    return False
+
+
 def state(node: str) -> dict:
     return json.loads(compose("exec", "-T", f"node-{node}", "failover", "state", f"/config/{node}.json"))
 
