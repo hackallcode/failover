@@ -6,7 +6,7 @@ from tests.stand import stand
 TTL = 10
 FENCE = TTL * 0.7
 RECOVERY = 60
-SYNC = 2.0  # Litestream's sync interval and some slack
+SYNC = 2.0  # the replica's change check and some slack
 
 
 def check_single_writer(rows):

@@ -95,6 +95,7 @@ async def test_re_elected_leader_keeps_its_newer_local_database(world):
     await a.agent.check_fence()
     assert not a.service.up
     cluster.lease = None
+    clock.now += 20  # past yield_for: a fenced node lets others go first
     await a.agent.tick()
     assert a.service.up and a.replica.restores == 0
     assert a.replica.local() == {"main": 6}
@@ -151,6 +152,21 @@ async def test_manual_switch_hands_over_and_the_old_leader_waits(world):
     await b.agent.tick()
     assert b.service.up and dns["name"] == "b"
     assert cluster.desired is None
+
+
+async def test_a_hand_over_whose_last_change_did_not_ship_keeps_the_lease(world):
+    cluster, _, _, clock, nodes = world
+    a = nodes["a"]
+    await a.agent.tick()
+    a.replica.write("main", 3)
+    a.replica.ships_fail = True
+    cluster.desired = Desired("b", at=clock.now)
+    with pytest.raises(TimeoutError):
+        await a.agent.tick()
+    assert a.agent.leading and cluster.lease[0] == "a"
+    a.replica.ships_fail = False
+    await a.agent.tick()
+    assert not a.agent.leading and cluster.lease is None
 
 
 async def test_held_leader_neither_hands_over_nor_restarts(world):
@@ -375,7 +391,7 @@ async def test_a_request_for_the_leader_itself_is_cleared(world):
     assert cluster.desired is None and a.agent.leading
 
 
-async def test_a_failed_take_over_clears_the_request_for_it(world):
+async def test_a_switch_request_outlives_a_failed_take_over(world):
     cluster, _, _, clock, nodes = world
     a, b = nodes["a"], nodes["b"]
     await a.agent.tick()
@@ -385,7 +401,13 @@ async def test_a_failed_take_over_clears_the_request_for_it(world):
     await a.agent.tick()
     b.replica.short = True
     await b.agent.tick()
-    assert not b.agent.leading and cluster.desired is None
+    assert not b.agent.leading and cluster.desired.node == "b"
+    clock.now += 20
+    await a.agent.tick()
+    assert not a.agent.leading
+    b.replica.short = False
+    await b.agent.tick()
+    assert b.agent.leading and cluster.desired is None
 
 
 async def test_a_stale_request_is_not_reported(world):
@@ -468,7 +490,7 @@ async def test_no_replication_starts_before_the_replica_stream_has_a_leader(worl
     assert a.service.up and a.replica.replicating
 
 
-async def test_a_stalled_litestream_is_restarted(world):
+async def test_stalled_replication_is_restarted(world):
     _, _, _, _, nodes = world
     a = nodes["a"]
     await a.agent.tick()
@@ -493,3 +515,19 @@ async def test_the_leader_reports_how_long_its_writes_are_not_replicated(world):
     clock.now += 10
     await a.agent.tick()
     assert a.agent.status.replication_lag == 0
+
+
+async def test_a_fenced_leader_leaves_the_lease_to_a_healthy_node(world):
+    cluster, _, _, clock, nodes = world
+    a, b = nodes["a"], nodes["b"]
+    await a.agent.tick()
+    a.replica.write("main", 5)
+    await a.agent.tick()
+    await a.agent.fence("the lease is running out")
+    await a.agent.tick()
+    assert not a.agent.leading and cluster.lease[0] == "a"
+    cluster.lease = None
+    clock.now += 1
+    await a.agent.tick()
+    await b.agent.tick()
+    assert not a.agent.leading and b.agent.leading

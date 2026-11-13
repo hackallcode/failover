@@ -14,7 +14,7 @@ log = logging.getLogger(__name__)
 
 RENEW_ATTEMPTS = 3
 STANDBY_POLL = 0.5
-LITESTREAM_STALL = 30
+REPLICATION_STALL = 30
 
 
 class LeaseLost(Exception):
@@ -63,10 +63,10 @@ class Replica(Protocol):
         """A lower bound: the replica may hold more by now."""
 
     def stall_seconds(self) -> float:
-        """How long the database has had writes Litestream has not turned into LTX."""
+        """How long the database has had changes that did not reach the replica."""
 
     async def ready(self) -> bool:
-        """Litestream started on a bucket whose stream has no leader yet hangs before its first sync."""
+        """The replica's stream has a leader, so writes can commit."""
 
     async def restore(self, required: set[str]) -> Txids | None: ...
 
@@ -149,7 +149,8 @@ class Agent:
         self.confirmed_sent = 0.0
         self.position_revision = 0
         self.position_checked = float("-inf")
-        self.handed_over_at: float | None = None
+        self.yielded_at: float | None = None
+        self.lease_may_be_from_an_earlier_run = True
         self.behind_since: float | None = None
         self.ticked_at = clock()
         self.lock = asyncio.Lock()
@@ -185,6 +186,7 @@ class Agent:
         if self.term is None:
             return
         term, self.term = self.term, None
+        self.yielded_at = self.wall()
         self.status.action = Action.FENCED
         log.warning("fence (term %s): %s", term, why)
         await self.stop_serving()
@@ -244,12 +246,13 @@ class Agent:
             await self.stop_serving()
         await self.replica.follow()
         self.status.leader = await self.election.holder()
-        if self.status.leader == self.s.node:
+        if self.status.leader == self.s.node and self.lease_may_be_from_an_earlier_run:
             await self.election.release_mine()
             self.status.leader = None
+        self.lease_may_be_from_an_earlier_run = False
         if self.status.leader is not None or not self.s.candidate:
             return
-        if not may_campaign(desired, self.s.node, self.wall(), self.s.desired_valid, self.handed_over_at,
+        if not may_campaign(desired, self.s.node, self.wall(), self.s.desired_valid, self.yielded_at,
                             self.s.yield_for):
             return
         sent = self.clock()
@@ -263,7 +266,7 @@ class Agent:
             await self.take_over(term, desired)
         except Exception as e:
             if self.term == term:
-                await self.give_up(term, f"take-over failed: {e!r}", desired)
+                await self.give_up(term, f"take-over failed: {e!r}")
             raise
 
     async def take_over(self, term: int, desired: Desired | None) -> None:
@@ -283,16 +286,18 @@ class Agent:
         elif source is Source.RESTORE:
             restored = await self.replica.restore(set(goal or {}))
             if restored is None or not restore_serves(goal, restored):
-                await self.give_up(term, f"restore got {restored}, short of {goal}", desired)
+                await self.give_up(term, f"restore got {restored}, short of {goal}")
                 return
         if self.term != term:
             return
         held = highest(goal or {}, restored, self.replica.local() if source is Source.LOCAL else {})
         if not await self.replica.ready():
-            await self.give_up(term, "the replica has no stream leader yet", desired)
+            await self.give_up(term, "the replica has no stream leader yet")
             return
         if not await self.claim_position(held, term):
-            await self.give_up(term, "another node recorded a position meanwhile", desired)
+            await self.give_up(term, "another node recorded a position meanwhile")
+            return
+        if self.term != term:
             return
         await self.dns.point_here()
         await self.replica.replicate()
@@ -329,13 +334,12 @@ class Agent:
         self.status.position = claimed
         return True
 
-    async def give_up(self, term: int, why: str, desired: Desired | None) -> None:
+    async def give_up(self, term: int, why: str) -> None:
         self.term = None
-        self.handed_over_at = self.wall()
+        self.yielded_at = self.wall()
         self.status.action = Action.STANDBY
         await self.stop_serving()
         await self.try_record(f"did not take over: {why}")
-        await self.clear_request_for_me(desired)
         try:
             await self.election.release(self.revision)
         except Exception as e:
@@ -360,8 +364,8 @@ class Agent:
                 return
         self.status.action = Action.SERVING
         stall = self.replica.stall_seconds()
-        if stall > LITESTREAM_STALL:
-            log.warning("litestream stalled for %.0fs: restarting it", stall)
+        if stall > REPLICATION_STALL:
+            log.warning("replication stalled for %.0fs: restarting it", stall)
             await self.replica.stop_replicating(graceful=False)
             await self.replica.replicate()
         await self.advance_position()
@@ -408,7 +412,7 @@ class Agent:
         if self.term != term:
             return
         self.term = None
-        self.handed_over_at = self.wall()
+        self.yielded_at = self.wall()
         await self.election.release(self.revision)
         await self.try_record(f"handed over to {to} on request")
 

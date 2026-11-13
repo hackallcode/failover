@@ -2,6 +2,7 @@ import asyncio
 import uuid
 
 import pytest
+from nats.js.api import KeyValueConfig
 from nats.js.errors import BucketNotFoundError, NotFoundError
 
 from failover.agent import LeaseLost, RevisionMoved
@@ -93,12 +94,15 @@ async def test_history_keeps_the_newest(js):
     assert [h["event"] for h in await a.history()] == ["became leader", "standby"]
 
 
-async def test_reopening_with_another_ttl_moves_the_lease_expiry(js):
+async def test_a_lease_lives_by_its_writers_ttl(js):
     service = f"svc{uuid.uuid4().hex[:8]}"
-    await NatsElection.open(js, service, "a", lease_ttl=2, replicas=1)
-    await NatsElection.open(js, service, "a", lease_ttl=5, replicas=1)
-    info = await js.stream_info(f"KV_lease-{service}")
-    assert info.config.max_age == 5
+    long = await NatsElection.open(js, service, "a", lease_ttl=5, replicas=1)
+    short = await NatsElection.open(js, service, "b", lease_ttl=1, replicas=1)
+    await long.acquire()
+    await asyncio.sleep(2)
+    assert await short.acquire() is None
+    await asyncio.sleep(4)
+    assert await short.acquire()
 
 
 async def test_position_write_with_a_lost_reply_is_still_mine(js):
@@ -112,12 +116,19 @@ async def test_position_write_with_a_lost_reply_is_still_mine(js):
         await a.record_position(Position(txids={"main": 7}, node="a", term=3), r1)
 
 
-async def test_attach_neither_creates_nor_changes_buckets(js):
-    service = f"svc{uuid.uuid4().hex[:8]}"
+async def without_bucket(js):
+    try:
+        await js.delete_key_value(NatsElection.BUCKET)
+    except NotFoundError:
+        pass
+
+
+async def test_attach_neither_creates_nor_changes_the_bucket(js):
+    await without_bucket(js)
     with pytest.raises(BucketNotFoundError):
-        await NatsElection.attach(js, service, "a")
+        await NatsElection.attach(js, "svc", "a")
     with pytest.raises(NotFoundError):
-        await js.stream_info(f"KV_lease-{service}")
+        await js.stream_info(f"KV_{NatsElection.BUCKET}")
 
 
 async def test_release_mine_frees_only_this_nodes_lease(js):
@@ -127,3 +138,11 @@ async def test_release_mine_frees_only_this_nodes_lease(js):
     assert await a.holder() == "a"
     await a.release_mine()
     assert await b.acquire()
+
+
+async def test_a_bucket_of_an_earlier_agent_gets_direct_reads(js):
+    await without_bucket(js)
+    await js.create_key_value(config=KeyValueConfig(bucket=NatsElection.BUCKET, history=1))
+    election = await NatsElection.open(js, f"svc{uuid.uuid4().hex[:8]}", "a", lease_ttl=30, replicas=1)
+    assert (await js.stream_info(f"KV_{NatsElection.BUCKET}")).config.allow_direct
+    assert await election.acquire() and await election.holder() == "a"
