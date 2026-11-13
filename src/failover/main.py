@@ -135,7 +135,7 @@ async def run(config: Config) -> None:
                         desired_valid=config.desired_valid, yield_for=config.yield_for, held=held(config),
                         standby_wait=STANDBY_WAIT)
     agent = Agent(settings, election, replica, service(config), dns(config),
-                  placement=StreamLeaders(nc, [election.stream], config.nats.server_name or config.node)
+                  placement=StreamLeaders(nc, election.stream, config.nats.server_name or config.node)
                   if config.place_streams else None)
     async with asyncio.TaskGroup() as tasks:
         tasks.create_task(agent.run())

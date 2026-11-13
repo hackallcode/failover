@@ -6,20 +6,19 @@ write compares the key's revision, so only the holder can renew it, and the term
 A released or expired lease is an empty value or no key; both are free.
 """
 import json
+import math
 import time
 
 from nats.js import JetStreamContext
 from nats.js.api import KeyValueConfig
-from nats.js.errors import APIError, KeyNotFoundError, KeyWrongLastSequenceError, NotFoundError
+from nats.js.errors import APIError, KeyNotFoundError, KeyWrongLastSequenceError
 from nats.js.kv import KeyValue
 
 from failover.agent import LeaseLost, RevisionMoved
-from failover.buckets import bucket
+from failover.buckets import bucket, exact, stream
 from failover.domain import Desired, Position
 
 HISTORY_LENGTH = 50
-
-
 WRONG_LAST_SEQUENCE = (10071, 10164)
 
 
@@ -27,7 +26,7 @@ class NatsElection:
     BUCKET = "failover"
 
     def __init__(self, js: JetStreamContext, kv: KeyValue, service: str, node: str, lease_ttl: float | None = None):
-        self.js, self.kv, self.service, self.node, self.lease_ttl = js, kv, service, node, lease_ttl
+        self.js, self.kv, self.node, self.lease_ttl = js, kv, node, lease_ttl
         self.k_lease, self.k_desired, self.k_position, self.k_history = (
             f"{service}.lease", f"{service}.desired", f"{service}.position", f"{service}.history")
 
@@ -43,20 +42,16 @@ class NatsElection:
 
     @property
     def stream(self) -> str:
-        return f"KV_{self.BUCKET}"
+        return stream(self.BUCKET)
 
     async def exact(self, key: str) -> tuple[bytes | None, int]:
-        """Value and revision from the stream leader: a direct get may come from a lagging replica."""
-        try:
-            msg = await self.js.get_msg(self.stream, subject=f"$KV.{self.BUCKET}.{key}", direct=False)
-        except NotFoundError:
-            return None, 0
-        return msg.data or None, msg.seq
+        return await exact(self.js, self.BUCKET, key)
 
     async def write_lease(self, value: bytes, last: int) -> int:
-        """Each write carries the writer's TTL: the key outlives its holder's fencing whatever TTL others run with."""
+        """Each write carries the writer's TTL: the key outlives its holder's fencing whatever TTL others run with.
+        NATS takes whole seconds, so the TTL is rounded up, never down below the fencing time."""
         try:
-            ack = await self.js.publish(f"$KV.{self.BUCKET}.{self.k_lease}", value, msg_ttl=self.lease_ttl,
+            ack = await self.js.publish(f"$KV.{self.BUCKET}.{self.k_lease}", value, msg_ttl=math.ceil(self.lease_ttl),
                                         headers={"Nats-Expected-Last-Subject-Sequence": str(last)})
         except APIError as e:
             if e.err_code in WRONG_LAST_SEQUENCE:
@@ -163,13 +158,12 @@ class NatsElection:
 class StreamLeaders:
     """Renewals and replica writes then commit next to the leader, not on another, maybe busy, server."""
 
-    def __init__(self, nc, streams: list[str], server: str):
-        self.nc, self.streams, self.server = nc, streams, server
+    def __init__(self, nc, stream_name: str, server: str):
+        self.nc, self.stream, self.server = nc, stream_name, server
 
     async def pull_here(self) -> None:
-        for stream in self.streams:
-            info = json.loads((await self.nc.request(f"$JS.API.STREAM.INFO.{stream}", b"", timeout=5)).data)
-            leader = info.get("cluster", {}).get("leader")
-            if leader and leader != self.server:
-                await self.nc.request(f"$JS.API.STREAM.LEADER.STEPDOWN.{stream}",
-                                      json.dumps({"placement": {"preferred": self.server}}).encode(), timeout=5)
+        info = json.loads((await self.nc.request(f"$JS.API.STREAM.INFO.{self.stream}", b"", timeout=5)).data)
+        leader = info.get("cluster", {}).get("leader")
+        if leader and leader != self.server:
+            await self.nc.request(f"$JS.API.STREAM.LEADER.STEPDOWN.{self.stream}",
+                                  json.dumps({"placement": {"preferred": self.server}}).encode(), timeout=5)

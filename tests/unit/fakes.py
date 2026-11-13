@@ -89,6 +89,7 @@ class Replica:
         self.replicating = self.following = False
         self.restores = self.promotions = 0
         self.short = False
+        self.ships_fail = False
         self.unreadable = False
         self.leaderless = False
         self.stuck = False
@@ -137,6 +138,8 @@ class Replica:
 
     async def stop_replicating(self, graceful):
         self.replicating = False
+        if graceful and self.ships_fail:
+            raise TimeoutError("the last change did not reach the bucket")
 
     def write(self, db, txid):
         """The service commits and replication ships it."""

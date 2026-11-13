@@ -51,7 +51,6 @@ class Config:
     command: list[str]
     databases: dict[str, Path]
     dns: Dns
-    state_dir: Path
     candidate: bool = True
     lease_ttl: float = 15
     tick: float = 1
@@ -79,7 +78,7 @@ def load(path: Path) -> Config:
             service=raw["service"], node=raw["node"], nats=nats, projects=[Path(p) for p in raw.get("projects", [])],
             command=list(raw.get("command", [])),
             databases={name: Path(p) for name, p in raw["databases"].items()}, dns=dns,
-            state_dir=Path(raw["state_dir"]), candidate=bool(raw.get("candidate", True)),
+            candidate=bool(raw.get("candidate", True)),
             lease_ttl=float(raw.get("lease_ttl", 15)), tick=float(raw.get("tick", 1)),
             desired_valid=float(raw.get("desired_valid", 120)), yield_for=float(raw.get("yield_for", 15)),
             place_streams=bool(raw.get("place_streams", True)), hold_file=_path(raw.get("hold_file")), api=api,

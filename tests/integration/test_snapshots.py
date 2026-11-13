@@ -128,3 +128,23 @@ async def test_a_replicating_leader_knows_its_revisions_without_fetching_snapsho
     assert await leader.replicated() == leader.local()
     assert not fetched
     await leader.stop_replicating(graceful=False)
+
+
+async def test_a_snapshot_whose_reply_was_lost_is_taken_as_written(js, tmp_path):
+    service = f"svc{uuid.uuid4().hex[:8]}"
+    leader = await node(js, service, tmp_path / "a")
+    database(leader.databases[0].path, [1])
+    revisions = {"main": 0}
+    await leader.ship_once({}, revisions)
+    written = revisions["main"]
+
+    stale = {"main": 0}
+    await leader.ship_once({}, stale)
+    assert stale["main"] == written
+
+
+async def test_a_hand_over_fails_when_its_last_change_cannot_be_shipped(js, tmp_path):
+    leader = await node(js, f"svc{uuid.uuid4().hex[:8]}", tmp_path / "a")
+    leader.databases[0].path.write_bytes(b"not a database")
+    with pytest.raises(sqlite3.DatabaseError):
+        await leader.stop_replicating(graceful=True)

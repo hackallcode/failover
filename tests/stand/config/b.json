@@ -5,7 +5,6 @@
   "command": ["python3", "/stand/app.py"],
   "databases": {"main": "/data/app.db"},
   "dns": {"provider": "http", "names": ["app"], "ip": "b", "url": "http://dns:8053"},
-  "state_dir": "/data/failover",
   "lease_ttl": 10,
   "tick": 1
 }

@@ -154,6 +154,21 @@ async def test_manual_switch_hands_over_and_the_old_leader_waits(world):
     assert cluster.desired is None
 
 
+async def test_a_hand_over_whose_last_change_did_not_ship_keeps_the_lease(world):
+    cluster, _, _, clock, nodes = world
+    a = nodes["a"]
+    await a.agent.tick()
+    a.replica.write("main", 3)
+    a.replica.ships_fail = True
+    cluster.desired = Desired("b", at=clock.now)
+    with pytest.raises(TimeoutError):
+        await a.agent.tick()
+    assert a.agent.leading and cluster.lease[0] == "a"
+    a.replica.ships_fail = False
+    await a.agent.tick()
+    assert not a.agent.leading and cluster.lease is None
+
+
 async def test_held_leader_neither_hands_over_nor_restarts(world):
     cluster, store, dns, clock, _ = world
     a = Node("a", cluster, store, dns, clock, held=True)

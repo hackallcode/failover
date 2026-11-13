@@ -1,9 +1,7 @@
 """SQLite databases of one service replicated as whole compressed snapshots, one key each in the NATS KV bucket.
 
-The databases are small and change rarely: a snapshot per change costs a few kilobytes, where shipping a log
-through an object store lists the whole bucket on every operation. The version of a database is the revision of
-its key; the leader writes with the revision it last wrote, so a node that lost the lease cannot overwrite a newer
-snapshot.
+The version of a database is the revision of its key; the leader writes with the revision it last wrote, so a node
+that lost the lease cannot overwrite a newer snapshot.
 """
 import asyncio
 import logging
@@ -16,9 +14,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from nats.js import JetStreamContext
-from nats.js.errors import KeyWrongLastSequenceError, NotFoundError
+from nats.js.errors import KeyWrongLastSequenceError
 from nats.js.kv import KeyValue
 
+from failover.buckets import exact, stream
 from failover.domain import Txids
 
 log = logging.getLogger(__name__)
@@ -87,12 +86,12 @@ def fingerprint(path: Path) -> tuple:
 
 class SnapshotReplica:
     def __init__(self, js: JetStreamContext, kv: KeyValue, bucket: str, service: str, databases: list[Database]):
-        """Shares the service's bucket: a stream of its own would be another raft group heartbeating."""
         self.js, self.kv, self.bucket, self.databases = js, kv, bucket, databases
         self.prefix = f"{service}.snapshot."
-        self.stream = f"KV_{bucket}"
+        self.stream = stream(bucket)
         self.uploading: asyncio.Task | None = None
         self.following: asyncio.Task | None = None
+        self.installing: asyncio.Task | None = None
         self.unshipped_since: float | None = None
         self.shipped_revisions: dict[str, int] | None = None
 
@@ -100,12 +99,7 @@ class SnapshotReplica:
         return f"{self.prefix}{db.name}"
 
     async def latest(self, db: Database) -> tuple[bytes | None, int]:
-        """From the stream leader: a direct get may come from a lagging replica."""
-        try:
-            msg = await self.js.get_msg(self.stream, subject=f"$KV.{self.bucket}.{self.key(db)}", direct=False)
-        except NotFoundError:
-            return None, 0
-        return msg.data or None, msg.seq
+        return await exact(self.js, self.bucket, self.key(db))
 
     def local(self) -> Txids:
         return {db.name: v for db in self.databases if db.path.exists() and (v := read_version(db.path)) is not None}
@@ -137,7 +131,7 @@ class SnapshotReplica:
         restored: Txids = {}
         try:
             for db in self.databases:
-                data, revision = await asyncio.wait_for(self.latest(db), RESTORE_TIMEOUT)
+                data, revision = await self.latest(db)
                 if data is None:
                     if db.name in required:
                         return None
@@ -158,8 +152,8 @@ class SnapshotReplica:
                 continue
             for suffix in ("-wal", "-shm"):
                 Path(f"{db.path}{suffix}").unlink(missing_ok=True)
-            os.replace(version_file(db.standby), version_file(db.path))
             os.replace(db.standby, db.path)
+            os.replace(version_file(db.standby), version_file(db.path))
 
     async def follow(self) -> None:
         if self.following is None or self.following.done():
@@ -173,13 +167,19 @@ class SnapshotReplica:
             async for entry in watcher:
                 if entry is None or entry.key not in paths or not entry.value:
                     continue
-                await asyncio.to_thread(install, paths[entry.key], zlib.decompress(entry.value), entry.revision)
+                self.installing = asyncio.create_task(
+                    asyncio.to_thread(install, paths[entry.key], zlib.decompress(entry.value), entry.revision))
+                await asyncio.shield(self.installing)
         finally:
             await watcher.stop()
 
     async def stop_following(self) -> None:
+        """A thread cannot be cancelled: the copy it is writing lands before the standby files are touched."""
         await cancel(self.following)
         self.following = None
+        if self.installing is not None:
+            await asyncio.wait([self.installing])
+            self.installing = None
 
     async def replicate(self) -> None:
         if self.uploading is None or self.uploading.done():
@@ -199,7 +199,7 @@ class SnapshotReplica:
                 log.warning("ship: %r", e)
             await asyncio.sleep(CHECK_EVERY)
 
-    async def ship_once(self, shipped: dict[str, tuple], revisions: dict[str, int]) -> None:
+    async def ship_once(self, shipped: dict[str, tuple], revisions: dict[str, int], strict: bool = False) -> None:
         pending = False
         for db in self.databases:
             if not db.path.exists():
@@ -212,11 +212,13 @@ class SnapshotReplica:
                 data = await asyncio.to_thread(snapshot, db.path)
                 if len(data) > SNAPSHOT_MAX_BYTES:
                     raise ValueError(f"{db.name}: a {len(data)}-byte snapshot exceeds {SNAPSHOT_MAX_BYTES}")
-                revision = await self.kv.update(self.key(db), data, last=revisions[db.name])
+                revision = await self.write(db, data, revisions[db.name])
             except KeyWrongLastSequenceError:
                 log.error("%s: another node wrote a newer snapshot; this one stops shipping", db.name)
                 raise
             except Exception as e:
+                if strict:
+                    raise
                 log.warning("ship %s: %r", db.name, e)
                 continue
             revisions[db.name], shipped[db.name] = revision, mark
@@ -227,12 +229,23 @@ class SnapshotReplica:
         elif pending and self.unshipped_since is None:
             self.unshipped_since = time.monotonic()
 
+    async def write(self, db: Database, data: bytes, last: int) -> int:
+        """A write whose reply was lost has committed all the same: finding its own bytes there, the writer goes on."""
+        try:
+            return await self.kv.update(self.key(db), data, last=last)
+        except KeyWrongLastSequenceError:
+            stored, revision = await self.latest(db)
+            if stored == data:
+                return revision
+            raise
+
     async def stop_replicating(self, graceful: bool) -> None:
+        """Handing over, every change has to reach the bucket: a failure keeps the lease for another try."""
         await cancel(self.uploading)
         self.uploading = None
         if graceful:
             revisions = {db.name: (await self.latest(db))[1] for db in self.databases}
-            await self.ship_once({}, revisions)
+            await self.ship_once({}, revisions, strict=True)
 
 
 async def cancel(task: asyncio.Task | None) -> None:

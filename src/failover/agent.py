@@ -297,6 +297,8 @@ class Agent:
         if not await self.claim_position(held, term):
             await self.give_up(term, "another node recorded a position meanwhile")
             return
+        if self.term != term:
+            return
         await self.dns.point_here()
         await self.replica.replicate()
         await self.service.start()
