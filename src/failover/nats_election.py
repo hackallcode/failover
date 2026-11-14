@@ -5,9 +5,12 @@ The lease is a key whose every write expires after the lease TTL: a holder that 
 write compares the key's revision, so only the holder can renew it, and the term is the revision that created it.
 A released or expired lease is an empty value or no key; both are free.
 """
+import asyncio
 import json
+import logging
 import math
 import time
+from dataclasses import dataclass
 
 from nats.js import JetStreamContext
 from nats.js.api import KeyValueConfig
@@ -21,19 +24,60 @@ from failover.domain import Desired, Position
 HISTORY_LENGTH = 50
 WRONG_LAST_SEQUENCE = (10071, 10164)
 
+log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Pushed:
+    """A key's latest value as the bucket pushed it, and when it arrived."""
+    value: bytes | None
+    at: float
+
 
 class NatsElection:
     BUCKET = "failover"
 
     def __init__(self, js: JetStreamContext, kv: KeyValue, service: str, node: str, lease_ttl: float | None = None):
         self.js, self.kv, self.node, self.lease_ttl = js, kv, node, lease_ttl
+        self.pushed: dict[str, Pushed] = {}
+        self.watching: asyncio.Task | None = None
         self.k_lease, self.k_desired, self.k_position, self.k_history = (
             f"{service}.lease", f"{service}.desired", f"{service}.position", f"{service}.history")
 
     @classmethod
     async def open(cls, js: JetStreamContext, service: str, node: str, lease_ttl: float, replicas: int):
         kv = await bucket(js, KeyValueConfig(bucket=cls.BUCKET, history=1, replicas=replicas, direct=True))
-        return cls(js, kv, service, node, lease_ttl)
+        election = cls(js, kv, service, node, lease_ttl)
+        election.watch()
+        return election
+
+    def watch(self) -> None:
+        """The lease and the switch request pushed as they change: any replica answers a read, so reading them every
+        tick would cross a route each time."""
+        self.pushed = {}
+        self.watching = asyncio.create_task(self.keep_watching())
+
+    async def keep_watching(self) -> None:
+        await asyncio.gather(self.follow_key(self.k_lease), self.follow_key(self.k_desired))
+
+    async def follow_key(self, key: str) -> None:
+        watcher = await self.kv.watch(key)
+        try:
+            async for entry in watcher:
+                if entry is not None:
+                    self.pushed[key] = Pushed(entry.value, time.monotonic())
+                elif key not in self.pushed:  # the marker after the current values: the key has none
+                    self.pushed[key] = Pushed(None, time.monotonic())
+        finally:
+            await watcher.stop()
+
+    def latest(self, key: str) -> Pushed | None:
+        """None until the watch delivered the key; a watch that died says why and starts over."""
+        if self.watching is not None and self.watching.done():
+            if not self.watching.cancelled() and self.watching.exception():
+                log.warning("watch: %r", self.watching.exception())
+            self.watch()
+        return self.pushed.get(key)
 
     @classmethod
     async def attach(cls, js: JetStreamContext, service: str, node: str):
@@ -89,6 +133,11 @@ class NatsElection:
             await self.release(revision)
 
     async def holder(self) -> str | None:
+        """A lease that went unrenewed for a TTL has expired: its key leaves without a word to the watch."""
+        pushed = self.latest(self.k_lease)
+        if pushed is not None:
+            fresh = time.monotonic() - pushed.at < self.lease_ttl
+            return pushed.value.decode() if pushed.value and fresh else None
         try:
             entry = await self.kv.get(self.k_lease)
         except KeyNotFoundError:
@@ -96,13 +145,17 @@ class NatsElection:
         return entry.value.decode() if entry.value else None
 
     async def desired(self) -> Desired | None:
-        try:
-            entry = await self.kv.get(self.k_desired)
-        except KeyNotFoundError:
+        pushed = self.latest(self.k_desired)
+        if pushed is not None:
+            value = pushed.value
+        else:
+            try:
+                value = (await self.kv.get(self.k_desired)).value
+            except KeyNotFoundError:
+                return None
+        if not value:
             return None
-        if not entry.value:
-            return None
-        d = json.loads(entry.value)
+        d = json.loads(value)
         return Desired(node=d["node"], at=d["at"])
 
     async def request(self, desired: Desired) -> None:

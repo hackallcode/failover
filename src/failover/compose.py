@@ -8,11 +8,11 @@ log = logging.getLogger(__name__)
 COMPOSE_TIMEOUT = 120
 
 
-async def compose(directory: Path, *args: str) -> tuple[int, str]:
+async def compose(directory: Path, *args: str, timeout: float = COMPOSE_TIMEOUT) -> tuple[int, str]:
     proc = await asyncio.create_subprocess_exec("docker", "compose", *args, cwd=directory,
                                                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
-        out, err = await asyncio.wait_for(proc.communicate(), COMPOSE_TIMEOUT)
+        out, err = await asyncio.wait_for(proc.communicate(), timeout)
     except TimeoutError:
         proc.kill()
         await proc.wait()
@@ -23,12 +23,12 @@ async def compose(directory: Path, *args: str) -> tuple[int, str]:
 
 
 class ComposeService:
-    def __init__(self, projects: list[Path]):
-        self.projects = projects
+    def __init__(self, projects: list[Path], start_timeout: float = COMPOSE_TIMEOUT):
+        self.projects, self.start_timeout = projects, start_timeout
 
     async def start(self) -> None:
         for project in self.projects:
-            code, _ = await compose(project, "up", "-d")
+            code, _ = await compose(project, "up", "-d", timeout=self.start_timeout)
             if code:
                 raise RuntimeError(f"{project} did not start")
 

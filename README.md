@@ -6,16 +6,21 @@ keep a standby copy of its databases and stay stopped.
 
 - **Election**: a key in the JetStream KV bucket `failover`; each write expires after the writer's lease TTL. Every
   write compares the key's revision, so only the holder renews it; the term is the revision that created it.
+  Agents learn the holder and switch requests from a watch on their keys rather than reading them every tick: any
+  replica answers a read, so each would cross a route. A lease unrenewed for a TTL counts as expired, and a lease
+  is taken only after a read from the stream leader.
 - **Fencing**: a leader stops the service once 70% of the TTL passed since its last confirmed renewal was sent. The
   key expires on the server no earlier than a full TTL after that send, so no other node can hold it while the old
   leader still serves.
-- **State**: the leader checks its databases every second and, on a change, writes a compressed snapshot of each
-  changed one to its key in the same bucket, comparing the key's revision, so a node that lost the lease cannot
-  overwrite a newer snapshot. Standbys watch the bucket and keep a copy as each snapshot arrives; nothing polls.
+- **State**: the leader checks its databases every second and, on a change, writes the pages that differ from the
+  database's last compressed image in the same bucket; once they outweigh a quarter of the image, or the image is a
+  day old, it writes a new image instead. Every write compares the key's revision, so a node that lost the lease
+  cannot overwrite a newer one. Standbys watch the bucket and rebuild their copy from each image and delta as it
+  arrives; nothing polls.
   The leader records the newest replicated revisions (the position) in KV; a new leader starts only from a
   database that reaches it: its own, if it wrote the position and is not behind it; a standby copy that caught up;
-  or the snapshot itself. Meant for small databases that change now and then: a snapshot travels as one NATS
-  message of at most 1 MB.
+  or the image and delta in the bucket. Meant for small databases: an image travels as one NATS message of at most
+  1 MB.
 - **Traffic**: the leader points DNS records at itself (Cloudflare).
 - **Manual switch**: a request names the node to lead; the leader stops, ships the rest, records the position and
   frees the lease; the requested node takes it.
@@ -23,7 +28,7 @@ keep a standby copy of its databases and stay stopped.
 ## Guarantees and limits
 
 - Two nodes never serve the same service at once while the clocks on a node advance at about the same rate.
-- Replication is asynchronous: a leader that dies loses what changed since its last snapshot (up to a second). A
+- Replication is asynchronous: a leader that dies loses what changed since it last shipped (up to a second). A
   leader cut off from the quorum keeps serving whoever can still reach it until it fences, and those writes are
   lost: up to 70% of the TTL.
 - A node never serves a database behind the recorded position. When no node can reach it (the replica is short
@@ -62,8 +67,10 @@ One JSON file per service and node:
 ```
 
 - `projects`: docker compose projects started in order and stopped in reverse; or `command`, one process.
-- `databases`: name → path; the name is stable across nodes, and the database's key in the bucket is
-  `<service>.snapshot.<name>`.
+- `start_timeout` (120 s): how long `docker compose up` of one project may take, e.g. while a one-shot service it
+  depends on waits for something.
+- `databases`: name → path; the name is stable across nodes, and the database's keys in the bucket are
+  `<service>.snapshot.<name>` (the image) and `<service>.snapshot.<name>.delta` (the pages changed since).
 - `nats`: `servers`, tried in order: put this node's own server first, so losing another server does not cut
   the leader off; `user` and `password_file` if the servers require them, `tls` (`ca`, `cert`, `key`) for client
   certificates, `server_name` if this node's NATS server is named differently from `node`.

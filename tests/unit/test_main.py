@@ -15,6 +15,12 @@ def test_a_held_leader_still_counts_as_the_leader(tmp_path):
     assert 'failover_leader{service="app"} 1' in main.metrics(agent, config)
 
 
+def test_a_slow_start_does_not_count_as_a_hung_agent(tmp_path):
+    config = load(write(tmp_path, start_timeout=300))
+    agent = SimpleNamespace(status=Status(action=Action.SERVING), starting_service=True)
+    assert main.stalled_after(agent, config) > 300
+
+
 async def test_a_command_retries_a_cluster_busy_electing(monkeypatch):
     async def no_wait(_):
         pass
