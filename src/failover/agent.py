@@ -153,6 +153,7 @@ class Agent:
         self.lease_may_be_from_an_earlier_run = True
         self.behind_since: float | None = None
         self.ticked_at = clock()
+        self.starting_service = False
         self.lock = asyncio.Lock()
 
     @property
@@ -197,6 +198,14 @@ class Agent:
             await self.replica.stop_replicating(graceful=False)
         finally:
             await self.service.stop()
+
+    async def start_service(self) -> None:
+        """Holds up the tick for as long as the service takes to start; the watchdog allows for it meanwhile."""
+        self.starting_service = True
+        try:
+            await self.service.start()
+        finally:
+            self.starting_service = False
 
     async def serving(self) -> bool:
         return await self.service.running()
@@ -301,7 +310,7 @@ class Agent:
             return
         await self.dns.point_here()
         await self.replica.replicate()
-        await self.service.start()
+        await self.start_service()
         if self.term != term:
             await self.stop_serving()
             return
@@ -358,7 +367,7 @@ class Agent:
         if not await self.service.complete() and await self.replica.ready():
             term = self.term
             await self.replica.replicate()
-            await self.service.start()
+            await self.start_service()
             if self.term != term:
                 await self.stop_serving()
                 return

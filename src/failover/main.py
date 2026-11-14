@@ -100,14 +100,20 @@ def metrics(agent: Agent, config: Config) -> str:
     return "".join(f"{k if '{' in k else k + labels} {v}\n" for k, v in values.items())
 
 
+def stalled_after(agent: Agent, config: Config) -> float:
+    seconds = max(10 * config.tick, config.lease_ttl / 2)
+    if agent.status.action is Action.TAKING_OVER:
+        seconds += RESTORE_TIMEOUT * len(config.databases)
+    if agent.starting_service:
+        seconds += config.start_timeout * len(config.projects)
+    return seconds
+
+
 async def supervise(agent: Agent, config: Config) -> None:
     """Report liveness only while ticks complete, so a hung agent is killed and its service stopped."""
     notify("READY=1")
     while True:
-        stalled_after = max(10 * config.tick, config.lease_ttl / 2)
-        if agent.status.action is Action.TAKING_OVER:
-            stalled_after += RESTORE_TIMEOUT * len(config.databases)
-        if time.monotonic() - agent.ticked_at < stalled_after:
+        if time.monotonic() - agent.ticked_at < stalled_after(agent, config):
             notify("WATCHDOG=1")
         if config.metrics_dir:
             path = config.metrics_dir / f"failover_{config.service}.prom"
