@@ -67,6 +67,8 @@ One JSON file per service and node:
 ```
 
 - `projects`: docker compose projects started in order and stopped in reverse; or `command`, one process.
+- `start_timeout` (120 s): how long `docker compose up` of one project may take, e.g. while a one-shot service it
+  depends on waits for something.
 - `databases`: name → path; the name is stable across nodes, and the database's keys in the bucket are
   `<service>.snapshot.<name>` (the image) and `<service>.snapshot.<name>.delta` (the pages changed since).
 - `nats`: `servers`, tried in order: put this node's own server first, so losing another server does not cut

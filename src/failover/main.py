@@ -147,7 +147,7 @@ async def run(config: Config) -> None:
 
 
 def service(config: Config) -> ComposeService | ProcessService:
-    return ProcessService(config.command) if config.command else ComposeService(config.projects)
+    return ProcessService(config.command) if config.command else ComposeService(config.projects, config.start_timeout)
 
 
 async def stop(config: Config) -> None:
