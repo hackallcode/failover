@@ -348,14 +348,15 @@ class SnapshotReplica:
 
     async def write(self, key: str, data: bytes, last: int, base_revision: int | None = None) -> int:
         """A write whose reply was lost has committed all the same: finding its own bytes there, the writer goes on.
-        A delta over another image, left by a leader that lost the lease, gives way: no reader applies it."""
+        A delta over an older image, left by a leader that lost the lease, gives way: no reader applies it. One over a
+        newer image is the new leader's."""
         try:
             return await self.kv.update(key, data, last=last)
         except KeyWrongLastSequenceError:
             stored, revision = await exact(self.js, self.bucket, key)
             if stored == data:
                 return revision
-            if base_revision is not None and stored and delta_base(stored) != base_revision:
+            if base_revision is not None and stored and delta_base(stored) < base_revision:
                 return await self.kv.update(key, data, last=revision)
             raise
 

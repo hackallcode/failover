@@ -222,6 +222,25 @@ async def test_a_delta_over_another_image_is_neither_restored_nor_in_the_way(js,
     assert rows(old.databases[0].path) == list(range(1000, 1101))
 
 
+async def test_a_delta_over_an_older_image_does_not_overwrite_one_over_a_newer_image(js, tmp_path):
+    service = f"svc{uuid.uuid4().hex[:8]}"
+    old, new = await node(js, service, tmp_path / "a"), await node(js, service, tmp_path / "b")
+    padded(old.databases[0].path, range(100))
+    await old.load()
+    await old.ship_once({})
+    padded(new.databases[0].path, range(1000, 1100))
+    await new.load()
+    new.bases["main"] = None
+    await new.ship_once({})
+    padded(new.databases[0].path, [1100])
+    await new.ship_once({})
+
+    padded(old.databases[0].path, [100])
+    with pytest.raises(KeyWrongLastSequenceError):
+        await old.ship_once({})
+    assert (await old.restore({"main"})) == {"main": new.shipped_revisions["main"]}
+    assert rows(old.databases[0].path) == list(range(1000, 1101))
+
 async def test_an_image_a_day_old_is_replaced_by_the_next_change(js, tmp_path, monkeypatch):
     leader = await node(js, f"svc{uuid.uuid4().hex[:8]}", tmp_path / "a")
     path = leader.databases[0].path
