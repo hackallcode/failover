@@ -3,6 +3,9 @@ from nats.js.api import KeyValueConfig
 from nats.js.errors import NotFoundError
 from nats.js.kv import KeyValue
 
+# The error codes of a write that compared a revision and found another.
+WRONG_LAST_SEQUENCE = (10071, 10164)
+
 
 def stream(bucket_name: str) -> str:
     return f"KV_{bucket_name}"
