@@ -3,7 +3,9 @@
 Each database has two keys: `<db>` holds a compressed image, `<db>.delta` the pages that differ from that image now,
 so a change ships only its pages and a reader needs no history. Once the pages outweigh a share of the image, the
 leader writes a new image. The version of a database is the revision of the last of its writes; every write compares
-the key's revision, so a node that lost the lease cannot overwrite a newer one.
+the key's revision, so a node that lost the lease cannot overwrite a newer one. A write left unanswered may land yet:
+it is sent again as it is before any other, so the next write neither builds on a revision it does not know nor takes
+this node's own write for another's.
 """
 import asyncio
 import hashlib
@@ -150,6 +152,7 @@ class SnapshotReplica:
         self.bases: dict[str, Base | None] = {}
         self.image_revisions: dict[str, int] = {}
         self.delta_revisions: dict[str, int] = {}
+        self.unanswered: tuple[str, bytes, int] | None = None
 
     def key(self, db: Database) -> str:
         return f"{self.prefix}{db.name}"
@@ -192,6 +195,12 @@ class SnapshotReplica:
             if version:
                 txids[db.name] = version
         return txids
+
+    def superseded(self) -> bool:
+        """Another node wrote over this one's snapshots: whatever its lease says, it no longer leads."""
+        task = self.uploading
+        return (task is not None and task.done() and not task.cancelled()
+                and isinstance(task.exception(), KeyWrongLastSequenceError))
 
     async def ready(self) -> bool:
         info = await self.js.stream_info(self.stream)
@@ -294,6 +303,7 @@ class SnapshotReplica:
         self.shipped_revisions = None
         while True:
             try:
+                await self.settle()
                 if self.shipped_revisions is None:
                     await self.load()
                 await self.ship_once(shipped)
@@ -354,25 +364,49 @@ class SnapshotReplica:
         return revision
 
     async def write(self, key: str, data: bytes, last: int, base_revision: int | None = None) -> int:
-        """A write whose reply was lost has committed all the same: finding its own bytes there, the writer goes on.
-        A delta over an older image, left by a leader that lost the lease, gives way: no reader applies it. One over a
-        newer image is the new leader's."""
+        """A delta over an older image, left by a leader that lost the lease, gives way: no reader applies it. One over
+        a newer image is the new leader's."""
         try:
-            return await self.kv.update(key, data, last=last)
+            return await self.put(key, data, last)
+        except KeyWrongLastSequenceError:
+            if base_revision is None:
+                raise
+            stored, revision = await exact(self.js, self.bucket, key)
+            if stored and delta_base(stored) < base_revision:
+                return await self.put(key, data, revision)
+            raise
+
+    async def put(self, key: str, data: bytes, last: int) -> int:
+        """Finding its own bytes there, a write sent again has landed the first time."""
+        self.unanswered = (key, data, last)
+        try:
+            revision = await self.kv.update(key, data, last=last)
         except KeyWrongLastSequenceError:
             stored, revision = await exact(self.js, self.bucket, key)
-            if stored == data:
-                return revision
-            if base_revision is not None and stored and delta_base(stored) < base_revision:
-                return await self.kv.update(key, data, last=revision)
-            raise
+            if stored != data:
+                self.unanswered = None
+                raise
+        self.unanswered = None
+        return revision
+
+    async def settle(self) -> None:
+        """The write left unanswered, sent again: then it has landed or never will, and the bucket is read again. A
+        newer write there, maybe this node's own from a later term, rejects it; the next write still compares."""
+        if self.unanswered is None:
+            return
+        try:
+            await self.put(*self.unanswered)
+        except KeyWrongLastSequenceError:
+            pass
+        self.shipped_revisions = None
 
     async def stop_replicating(self, graceful: bool) -> None:
         """Handing over, every change has to reach the bucket: a failure keeps the lease for another try. A write cut
-        off by the cancel may have landed, so the bucket is read again first."""
+        off by the cancel may have landed, so it is settled and the bucket read again first."""
         await cancel(self.uploading)
         self.uploading = None
         if graceful:
+            await self.settle()
             await self.load()
             await self.ship_once({}, strict=True)
 

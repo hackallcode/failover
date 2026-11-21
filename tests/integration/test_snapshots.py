@@ -6,6 +6,7 @@ import uuid
 import zlib
 from contextlib import closing
 
+import nats
 import pytest
 from nats.js.api import KeyValueConfig
 from nats.js.errors import KeyWrongLastSequenceError
@@ -70,6 +71,31 @@ async def test_an_unchanged_database_is_not_shipped_again(js, tmp_path):
         await asyncio.sleep(2.5)
     await leader.stop_replicating(graceful=False)
     assert (await leader.replicated())["main"] == shipped
+
+
+async def test_a_write_whose_answer_was_lost_does_not_stop_the_shipping(js, tmp_path):
+    service = f"svc{uuid.uuid4().hex[:8]}"
+    leader, other = await node(js, service, tmp_path / "a"), await node(js, service, tmp_path / "b")
+    path = leader.databases[0].path
+    database(path, [1])
+    await leader.replicate()
+    await eventually(lambda: leader.local().get("main"))
+    update = leader.kv.update
+
+    async def answer_lost(*args, **kwargs):
+        del leader.kv.update
+        await update(*args, **kwargs)
+        raise nats.errors.TimeoutError()
+
+    leader.kv.update = answer_lost
+    database(path, [2])
+    await eventually(lambda: "update" not in vars(leader.kv))
+    database(path, [3])  # the next write differs from the one that landed
+    await asyncio.sleep(2.5)
+    assert not leader.superseded()
+    await leader.stop_replicating(graceful=True)
+    await other.restore({"main"})
+    assert rows(other.databases[0].path) == [1, 2, 3]
 
 
 async def test_a_node_that_lost_the_lease_cannot_overwrite_a_newer_snapshot(js, tmp_path):

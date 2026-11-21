@@ -499,6 +499,29 @@ async def test_stalled_replication_is_restarted(world):
     assert a.replica.replication_restarts == 1 and a.replica.replicating and a.service.up
 
 
+async def test_a_restart_gets_a_stall_period_to_unstick_the_replication(world):
+    _, _, _, clock, nodes = world
+    a = nodes["a"]
+    await a.agent.tick()
+    a.replica.stuck = True
+    await a.agent.tick()
+    clock.now += 1
+    await a.agent.tick()
+    assert a.replica.replication_restarts == 1
+    clock.now += 30
+    await a.agent.tick()
+    assert a.replica.replication_restarts == 2
+
+
+async def test_a_leader_whose_replica_another_node_wrote_over_stops_serving(world):
+    _, _, _, _, nodes = world
+    a = nodes["a"]
+    await a.agent.tick()
+    a.replica.overwritten = True
+    await a.agent.tick()
+    assert not a.agent.leading and not a.service.up and not a.replica.replicating
+
+
 async def test_the_leader_reports_how_long_its_writes_are_not_replicated(world):
     _, store, _, clock, nodes = world
     a = nodes["a"]

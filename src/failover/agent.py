@@ -68,6 +68,9 @@ class Replica(Protocol):
     async def ready(self) -> bool:
         """The replica's stream has a leader, so writes can commit."""
 
+    def superseded(self) -> bool:
+        """Another node wrote over this one's replica: it stopped replicating for good."""
+
     async def restore(self, required: set[str]) -> Txids | None: ...
 
     async def promote_standby(self, required: set[str]) -> None: ...
@@ -152,6 +155,7 @@ class Agent:
         self.yielded_at: float | None = None
         self.lease_may_be_from_an_earlier_run = True
         self.behind_since: float | None = None
+        self.restarted_at = float("-inf")
         self.ticked_at = clock()
         self.starting_service = False
         self.lock = asyncio.Lock()
@@ -359,6 +363,9 @@ class Agent:
         if self.s.held():
             self.status.action = Action.HELD
             return
+        if self.replica.superseded():
+            await self.fence("another node wrote over the replica")
+            return
         to = hand_over_to(desired, self.s.node, self.wall(), self.s.desired_valid)
         if to is not None:
             await self.hand_over(to)
@@ -373,8 +380,10 @@ class Agent:
                 return
         self.status.action = Action.SERVING
         stall = self.replica.stall_seconds()
-        if stall > REPLICATION_STALL:
+        # A restart cancels what is in flight: one per stall period, or a slow write never gets to land.
+        if stall > REPLICATION_STALL and self.clock() - self.restarted_at > REPLICATION_STALL:
             log.warning("replication stalled for %.0fs: restarting it", stall)
+            self.restarted_at = self.clock()
             await self.replica.stop_replicating(graceful=False)
             await self.replica.replicate()
         await self.advance_position()

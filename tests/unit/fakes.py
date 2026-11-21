@@ -93,6 +93,7 @@ class Replica:
         self.unreadable = False
         self.leaderless = False
         self.stuck = False
+        self.overwritten = False
         self.replication_restarts = 0
 
     def local(self):
@@ -124,6 +125,9 @@ class Replica:
     async def ready(self):
         return not self.leaderless
 
+    def superseded(self):
+        return self.overwritten and self.replicating
+
     async def follow(self):
         self.following = True
 
@@ -133,7 +137,6 @@ class Replica:
     async def replicate(self):
         if self.stuck:
             self.replication_restarts += 1
-            self.stuck = False
         self.replicating = True
 
     async def stop_replicating(self, graceful):

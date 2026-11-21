@@ -18,11 +18,10 @@ from nats.js.errors import APIError, KeyNotFoundError, KeyWrongLastSequenceError
 from nats.js.kv import KeyValue
 
 from failover.agent import LeaseLost, RevisionMoved
-from failover.buckets import bucket, exact, stream
+from failover.buckets import WRONG_LAST_SEQUENCE, bucket, exact, stream
 from failover.domain import Desired, Position
 
 HISTORY_LENGTH = 50
-WRONG_LAST_SEQUENCE = (10071, 10164)
 
 log = logging.getLogger(__name__)
 
