@@ -102,6 +102,8 @@ that stays down leaves the lease to run out, and a standby takes over then.
 
 Run it under systemd as `Type=notify` with `WatchdogSec` and `ExecStopPost=failover stop <config>`: the service's
 containers outlive the agent, and a dead or hung agent must not leave them writing without the lease.
+An agent that cannot reach the quorum reports ready and waits for it with the service stopped; its metrics show no
+leader and an error meanwhile.
 
 The API (`api` in the config) answers `GET /state` and `POST /takeover` (a request for this node to lead) with a
 bearer token.
