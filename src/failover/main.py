@@ -9,6 +9,7 @@ import ssl
 import time
 import urllib.request
 from pathlib import Path
+from typing import Callable
 
 import nats
 from nats.js.errors import ServiceUnavailableError
@@ -59,7 +60,8 @@ def held(config: Config):
     return check
 
 
-async def connect(config: Config):
+async def connect(config: Config, failed: Callable[[Exception], None] | None = None):
+    """Retries until a server answers; each failed attempt goes to `failed`."""
     options = {}
     if config.nats.user:
         options.update(user=config.nats.user, password=config.nats.password_file.read_text().strip())
@@ -67,6 +69,11 @@ async def connect(config: Config):
         context = ssl.create_default_context(cafile=str(config.nats.tls.ca))
         context.load_cert_chain(str(config.nats.tls.cert), str(config.nats.tls.key))
         options.update(tls=context)
+    if failed:
+        async def error_cb(e: Exception) -> None:
+            log.warning("nats: %r", e)
+            failed(e)
+        options.update(error_cb=error_cb)
     nc = await nats.connect(servers=config.nats.servers, dont_randomize=True, connect_timeout=2,
                             max_reconnect_attempts=-1, reconnect_time_wait=1, ping_interval=2, max_outstanding_pings=2,
                             **options)
@@ -100,7 +107,18 @@ def metrics(s: Status, config: Config) -> str:
     return "".join(f"{k if '{' in k else k + labels} {v}\n" for k, v in values.items())
 
 
-def stalled_after(agent: Agent, config: Config) -> float:
+class Waiting:
+    """Stands in for the agent until the cluster lets it run: its attempts to reach the cluster count as ticks."""
+    starting_service = False
+
+    def __init__(self):
+        self.status, self.ticked_at = Status(), time.monotonic()
+
+    def failed(self, e: Exception) -> None:
+        self.status.error, self.ticked_at = repr(e), time.monotonic()
+
+
+def stalled_after(agent: Agent | Waiting, config: Config) -> float:
     seconds = max(10 * config.tick, config.lease_ttl / 2)
     if agent.status.action is Action.TAKING_OVER:
         seconds += RESTORE_TIMEOUT * len(config.databases)
@@ -109,10 +127,11 @@ def stalled_after(agent: Agent, config: Config) -> float:
     return seconds
 
 
-async def supervise(agent: Agent, config: Config) -> None:
+async def supervise(unit: Callable[[], Agent | Waiting], config: Config) -> None:
     """Report liveness only while ticks complete, so a hung agent is killed and its service stopped."""
     notify("READY=1")
     while True:
+        agent = unit()
         if time.monotonic() - agent.ticked_at < stalled_after(agent, config):
             notify("WATCHDOG=1")
         write_metrics(agent.status, config)
@@ -132,27 +151,29 @@ def write_metrics(status: Status, config: Config) -> None:
 
 
 async def run(config: Config) -> None:
-    nc, js = await connect(config)
-    election, replica = await set_up(config, js)
-    settings = Settings(node=config.node, candidate=config.candidate, lease_ttl=config.lease_ttl, tick=config.tick,
-                        desired_valid=config.desired_valid, yield_for=config.yield_for, held=held(config),
-                        standby_wait=STANDBY_WAIT)
-    agent = Agent(settings, election, replica, service(config), dns(config),
-                  placement=StreamLeaders(nc, election.stream, config.nats.server_name or config.node)
-                  if config.place_streams else None)
+    """A running unit from the start: a node cut off from the quorum would otherwise fail its start timeout and
+    restart forever, with no metrics to say why. It waits with the service stopped, as nothing fences it meanwhile."""
+    await service(config).stop()
+    waiting = Waiting()
+    unit: Agent | Waiting = waiting
     async with asyncio.TaskGroup() as tasks:
+        tasks.create_task(supervise(lambda: unit, config))
+        nc, js = await connect(config, waiting.failed)
+        election, replica = await set_up(config, js, waiting.failed)
+        settings = Settings(node=config.node, candidate=config.candidate, lease_ttl=config.lease_ttl,
+                            tick=config.tick, desired_valid=config.desired_valid, yield_for=config.yield_for,
+                            held=held(config), standby_wait=STANDBY_WAIT)
+        unit = agent = Agent(settings, election, replica, service(config), dns(config),
+                             placement=StreamLeaders(nc, election.stream, config.nats.server_name or config.node)
+                             if config.place_streams else None)
         tasks.create_task(agent.run())
-        tasks.create_task(supervise(agent, config))
         if config.api:
             api = Api(agent, election, config.service, config.api.token_file.read_text().strip(), config.dns.ip,
                       config.node, config.candidate)
             tasks.create_task(api.serve(config.api.listen))
 
 
-async def set_up(config: Config, js) -> tuple[NatsElection, SnapshotReplica]:
-    """Wait for the cluster as a running unit: a node cut off from the quorum would otherwise fail its start
-    timeout and restart forever, with no metrics to say why. The service stays stopped meanwhile."""
-    notify("READY=1")
+async def set_up(config: Config, js, failed: Callable[[Exception], None]) -> tuple[NatsElection, SnapshotReplica]:
     while True:
         try:
             election = await open_election(config, js)
@@ -160,8 +181,7 @@ async def set_up(config: Config, js) -> tuple[NatsElection, SnapshotReplica]:
                                               [Database(name, path) for name, path in config.databases.items()])
         except Exception as e:  # the cluster may still be electing its leaders, or be out of reach
             log.warning("setup: %r", e)
-            notify("WATCHDOG=1")
-            write_metrics(Status(error=repr(e)), config)
+            failed(e)
             await asyncio.sleep(2)
 
 
