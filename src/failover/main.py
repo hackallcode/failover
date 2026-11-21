@@ -13,7 +13,7 @@ from pathlib import Path
 import nats
 from nats.js.errors import ServiceUnavailableError
 
-from failover.agent import Action, Agent, Settings
+from failover.agent import Action, Agent, Settings, Status
 from failover.api import Api
 from failover.cloudflare import CloudflareRecord, Records
 from failover.compose import ComposeService
@@ -88,8 +88,8 @@ def notify(message: str) -> None:
         s.sendto(message.encode(), address)
 
 
-def metrics(agent: Agent, config: Config) -> str:
-    s, labels = agent.status, f'{{service="{config.service}"}}'
+def metrics(s: Status, config: Config) -> str:
+    labels = f'{{service="{config.service}"}}'
     values = {"failover_leader": int(s.leader == config.node and s.action in (Action.SERVING, Action.HELD)),
               "failover_has_leader": int(s.leader is not None),
               "failover_error": int(bool(s.error)),
@@ -115,28 +115,25 @@ async def supervise(agent: Agent, config: Config) -> None:
     while True:
         if time.monotonic() - agent.ticked_at < stalled_after(agent, config):
             notify("WATCHDOG=1")
-        if config.metrics_dir:
-            path = config.metrics_dir / f"failover_{config.service}.prom"
-            try:
-                tmp = path.with_suffix(".tmp")
-                tmp.write_text(metrics(agent, config))
-                os.replace(tmp, path)
-            except OSError as e:
-                log.warning("metrics: %r", e)
+        write_metrics(agent.status, config)
         await asyncio.sleep(config.tick)
+
+
+def write_metrics(status: Status, config: Config) -> None:
+    if not config.metrics_dir:
+        return
+    path = config.metrics_dir / f"failover_{config.service}.prom"
+    try:
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(metrics(status, config))
+        os.replace(tmp, path)
+    except OSError as e:
+        log.warning("metrics: %r", e)
 
 
 async def run(config: Config) -> None:
     nc, js = await connect(config)
-    while True:
-        try:
-            election = await open_election(config, js)
-            replica = SnapshotReplica(js, election.kv, NatsElection.BUCKET, config.service,
-                                      [Database(name, path) for name, path in config.databases.items()])
-            break
-        except Exception as e:  # the cluster may still be electing its leaders
-            log.warning("setup: %r", e)
-            await asyncio.sleep(2)
+    election, replica = await set_up(config, js)
     settings = Settings(node=config.node, candidate=config.candidate, lease_ttl=config.lease_ttl, tick=config.tick,
                         desired_valid=config.desired_valid, yield_for=config.yield_for, held=held(config),
                         standby_wait=STANDBY_WAIT)
@@ -150,6 +147,22 @@ async def run(config: Config) -> None:
             api = Api(agent, election, config.service, config.api.token_file.read_text().strip(), config.dns.ip,
                       config.node, config.candidate)
             tasks.create_task(api.serve(config.api.listen))
+
+
+async def set_up(config: Config, js) -> tuple[NatsElection, SnapshotReplica]:
+    """Wait for the cluster as a running unit: a node cut off from the quorum would otherwise fail its start
+    timeout and restart forever, with no metrics to say why. The service stays stopped meanwhile."""
+    notify("READY=1")
+    while True:
+        try:
+            election = await open_election(config, js)
+            return election, SnapshotReplica(js, election.kv, NatsElection.BUCKET, config.service,
+                                              [Database(name, path) for name, path in config.databases.items()])
+        except Exception as e:  # the cluster may still be electing its leaders, or be out of reach
+            log.warning("setup: %r", e)
+            notify("WATCHDOG=1")
+            write_metrics(Status(error=repr(e)), config)
+            await asyncio.sleep(2)
 
 
 def service(config: Config) -> ComposeService | ProcessService:
