@@ -11,6 +11,9 @@ on:
       chaos_steps:
         description: "chaos steps"
         default: "40"
+      chaos_seed:
+        description: "chaos seed, to replay a run (default: the run id)"
+        default: ""
 
 jobs:
   unit:
@@ -64,5 +67,5 @@ jobs:
       - run: make venv stand-build-ci
       - run: .venv/bin/python -m pytest -q -s tests/stand/test_chaos.py
         env:
-          CHAOS_SEED: ${{ contains(fromJSON('["push", "pull_request"]'), github.event_name) && '33' || github.run_id }}
+          CHAOS_SEED: ${{ contains(fromJSON('["push", "pull_request"]'), github.event_name) && '33' || inputs.chaos_seed || github.run_id }}
           CHAOS_STEPS: ${{ contains(fromJSON('["push", "pull_request"]'), github.event_name) && '6' || inputs.chaos_steps || '40' }}

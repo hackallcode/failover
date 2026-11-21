@@ -132,4 +132,5 @@ moment after a freeze), nothing committed earlier than the change check (1 s; is
 leader stopped is lost, a new leader serves within a minute.
 
 CI runs each stand scenario in its own job and a short chaos run with a fixed seed on every pull request and push to
-`master`, with the stand images from the Actions cache; the full chaos run is nightly.
+`master`, with the stand images from the Actions cache; the full chaos run is nightly. A manual run takes
+`chaos_seed` to replay a failed one with the seed it printed.
