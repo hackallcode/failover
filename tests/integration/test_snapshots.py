@@ -4,6 +4,7 @@ import sqlite3
 import time
 import uuid
 import zlib
+from contextlib import closing
 
 import pytest
 from nats.js.api import KeyValueConfig
@@ -14,7 +15,7 @@ from failover.snapshots import REBASE_EVERY, Database, SnapshotReplica, snapshot
 
 
 def database(path, rows):
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute("PRAGMA journal_mode=WAL")
         db.execute("CREATE TABLE IF NOT EXISTS t (n INTEGER)")
         db.executemany("INSERT INTO t VALUES (?)", [(n,) for n in rows])
@@ -57,11 +58,16 @@ async def test_a_leader_ships_each_change_and_another_node_restores_it(js, tmp_p
 async def test_an_unchanged_database_is_not_shipped_again(js, tmp_path):
     service = f"svc{uuid.uuid4().hex[:8]}"
     leader = await node(js, service, tmp_path / "a")
-    database(leader.databases[0].path, [1])
-    await leader.replicate()
-    await eventually(lambda: leader.local().get("main"))
-    shipped = leader.local()["main"]
-    await asyncio.sleep(2.5)
+    path = leader.databases[0].path
+    database(path, [1])
+    with closing(sqlite3.connect(path)) as writer:
+        writer.execute("INSERT INTO t VALUES (2)")
+        writer.commit()
+        await leader.replicate()
+        await eventually(lambda: leader.local().get("main"))
+        shipped = leader.local()["main"]
+        writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")  # the files change, the pages do not
+        await asyncio.sleep(2.5)
     await leader.stop_replicating(graceful=False)
     assert (await leader.replicated())["main"] == shipped
 

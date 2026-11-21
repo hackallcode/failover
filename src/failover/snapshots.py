@@ -6,6 +6,7 @@ leader writes a new image. The version of a database is the revision of the last
 the key's revision, so a node that lost the lease cannot overwrite a newer one.
 """
 import asyncio
+import hashlib
 import logging
 import os
 import sqlite3
@@ -145,6 +146,7 @@ class SnapshotReplica:
         self.installing: asyncio.Task | None = None
         self.unshipped_since: float | None = None
         self.shipped_revisions: dict[str, int] | None = None
+        self.shipped_digests: dict[str, bytes] = {}
         self.bases: dict[str, Base | None] = {}
         self.image_revisions: dict[str, int] = {}
         self.delta_revisions: dict[str, int] = {}
@@ -285,7 +287,7 @@ class SnapshotReplica:
             current = image and delta and delta_base(delta) == image_revisions[db.name]
             versions[db.name] = delta_revisions[db.name] if current else image_revisions[db.name]
         self.bases, self.image_revisions, self.delta_revisions = bases, image_revisions, delta_revisions
-        self.shipped_revisions = versions
+        self.shipped_revisions, self.shipped_digests = versions, {}
 
     async def ship_changes(self) -> None:
         shipped: dict[str, tuple] = {}
@@ -312,6 +314,10 @@ class SnapshotReplica:
             pending = True
             try:
                 image = await asyncio.to_thread(snapshot, db.path)
+                digest = hashlib.sha256(image).digest()
+                if self.shipped_digests.get(db.name) == digest:  # a checkpoint moves pages, not their contents
+                    shipped[db.name] = mark
+                    continue
                 revision = await self.ship(db, image)
             except KeyWrongLastSequenceError:
                 log.error("%s: another node wrote a newer snapshot; this one stops shipping", db.name)
@@ -322,6 +328,7 @@ class SnapshotReplica:
                 log.warning("ship %s: %r", db.name, e)
                 continue
             self.shipped_revisions[db.name], shipped[db.name] = revision, mark
+            self.shipped_digests[db.name] = digest
             await asyncio.to_thread(write_atomically, version_file(db.path), str(revision).encode())
         unshipped = any(db.path.exists() and shipped.get(db.name) != fingerprint(db.path) for db in self.databases)
         if not unshipped:
