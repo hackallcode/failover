@@ -241,16 +241,18 @@ class Agent:
             return
 
     async def tick(self) -> None:
-        async with self.lock:
-            desired = await self.election.desired()
-            fresh = desired_fresh(desired, self.wall(), self.s.desired_valid)
-            self.status.desired = desired.node if fresh else None
-            if self.leading:
-                await self.lead(desired)
-            else:
-                await self.stand_by(desired)
-        self.ticked_at = self.clock()
-        self.status.error = None
+        try:
+            async with self.lock:
+                desired = await self.election.desired()
+                fresh = desired_fresh(desired, self.wall(), self.s.desired_valid)
+                self.status.desired = desired.node if fresh else None
+                if self.leading:
+                    await self.lead(desired)
+                else:
+                    await self.stand_by(desired)
+            self.status.error = None
+        finally:
+            self.ticked_at = self.clock()
 
     async def stand_by(self, desired: Desired | None) -> None:
         self.status.action = Action.STANDBY
@@ -432,6 +434,7 @@ class Agent:
         self.term = None
         self.yielded_at = self.wall()
         await self.election.release(self.revision)
+        log.info("handed over to %s on request (term %s)", to, term)
         await self.try_record(f"handed over to {to} on request")
 
     async def try_record(self, event: str) -> None:
