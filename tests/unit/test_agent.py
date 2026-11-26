@@ -138,14 +138,16 @@ async def test_old_leader_cannot_record_after_a_takeover(world):
     assert cluster.position[0].node == "b"
 
 
-async def test_manual_switch_hands_over_and_the_old_leader_waits(world):
+async def test_manual_switch_hands_over_and_the_old_leader_waits(world, caplog):
     cluster, _, dns, clock, nodes = world
     a, b = nodes["a"], nodes["b"]
     await a.agent.tick()
     a.replica.write("main", 3)
     cluster.desired = Desired("b", at=clock.now)
-    await a.agent.tick()
+    with caplog.at_level("INFO", logger="failover.agent"):
+        await a.agent.tick()
     assert not a.service.up and cluster.lease is None
+    assert "handed over to b on request" in caplog.text
     assert cluster.position[0].txids == {"main": 3}
     await a.agent.tick()
     assert not a.agent.leading  # yields to the requested node
@@ -285,6 +287,16 @@ async def test_cluster_ok_follows_completed_ticks(world):
     cluster.down = False
     await a.agent.tick()
     assert a.agent.cluster_ok()
+
+
+async def test_a_tick_the_cluster_fails_still_counts_for_the_watchdog(world):
+    cluster, _, _, clock, nodes = world
+    a = nodes["a"]
+    cluster.down = True
+    clock.now += 100
+    with pytest.raises(TimeoutError):
+        await a.agent.tick()
+    assert a.agent.ticked_at == clock.now
 
 
 async def test_leader_restarts_a_part_of_the_service_that_stopped(world):
